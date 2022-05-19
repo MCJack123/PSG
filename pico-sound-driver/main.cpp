@@ -97,38 +97,38 @@ template<typename T> static T max(T a, T b) {return a > b ? a : b;}
 //      arguments:
 //      32 bits - floating-point time to fade for
 
-int currentChannel = 0;
-
 void interrupt(int channel) {
     gpio_put(PICO_DEFAULT_LED_PIN, false);
     gpio_put(PIN_DATA, true);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_CLOCK, true);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_CLOCK, false);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_DATA, false);
-    sleep_us(5);
+    sleep_us(1);
     for (int i = 0; i < channel; i++) {
         gpio_put(PIN_CLOCK, true);
-        sleep_us(5);
+        sleep_us(1);
         gpio_put(PIN_CLOCK, false);
-        sleep_us(5);
+        sleep_us(1);
     }
     gpio_put(PIN_STROBE, true);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_STROBE, false);
-    sleep_us(5);
-    for (int i = channel; i < 32; i++) {
+}
+
+void release() {
+    for (int i = 0; i < 32; i++) {
         gpio_put(PIN_CLOCK, true);
-        sleep_us(5);
+        sleep_us(1);
         gpio_put(PIN_CLOCK, false);
-        sleep_us(5);
+        sleep_us(1);
     }
     gpio_put(PIN_STROBE, true);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_STROBE, false);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PICO_DEFAULT_LED_PIN, true);
 }
 
@@ -141,7 +141,7 @@ void write_data(uint8_t data) {
     gpio_put(11, data & 0x04);
     gpio_put(12, data & 0x02);
     gpio_put(13, data & 0x01);
-    sleep_us(2);
+    sleep_us(1);
     gpio_put(14, true);
     sleep_us(1);
     gpio_put(14, false);
@@ -163,21 +163,21 @@ int main() {
     gpio_out(PIN_DATA);
     gpio_out(PIN_CLOCK);
     gpio_put(PIN_DATA, false);
-    sleep_us(5);
+    sleep_us(1);
     for (int i = 0; i < 32; i++) {
         gpio_put(PIN_CLOCK, true);
-        sleep_us(5);
+        sleep_us(1);
         gpio_put(PIN_CLOCK, false);
-        sleep_us(5);
+        sleep_us(1);
     }
     gpio_put(PIN_STROBE, true);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_CLOCK, true);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_CLOCK, false);
-    sleep_us(5);
+    sleep_us(1);
     gpio_put(PIN_STROBE, false);
-    sleep_us(5);
+    sleep_us(1);
     for (int i = 0; i < NUM_CHANNELS; i++) {
         channels[i].id = i;
         channels[i].lastUpdateTime = time_us_64() / 1000000.0;
@@ -225,6 +225,7 @@ int main() {
                 interrupt(channel);
                 write_data(COMMAND_WAVE_TYPE | typeconv[type]);
                 if (type == 5) write_data(channels[channel].duty * 255.0);
+                release();
                 break;
             } case 0x20: { // frequency
                 uint16_t freq = 0;
@@ -234,6 +235,7 @@ int main() {
                 interrupt(channel);
                 write_data(COMMAND_FREQUENCY | ((freq >> 8) & 0x3F));
                 write_data(freq & 0xFF);
+                release();
                 break;
             } case 0x40: { // volume
                 uint8_t vol = getchar();
@@ -242,6 +244,7 @@ int main() {
                 interrupt(channel);
                 write_data(COMMAND_VOLUME);
                 write_data(vol);
+                release();
                 break;
             } case 0x60: { // pan
                 int8_t pan = getchar();
@@ -264,6 +267,7 @@ int main() {
                     interrupt(channel);
                     write_data(COMMAND_VOLUME);
                     write_data(1);
+                    release();
                 } else if (time < 0.000001) {
                     channels[channel].fadeInit = 0.0;
                     channels[channel].fade = channels[channel].fadeMax = 0;
@@ -274,10 +278,8 @@ int main() {
                     interrupt(channel);
                     write_data(COMMAND_VOLUME);
                     write_data(0);
+                    release();
                 }
-                break;
-            } case 0xC0: { // set channel (debugging)
-                currentChannel = channel;
                 break;
             }
         }

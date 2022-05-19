@@ -1,5 +1,3 @@
-//#include <xc.inc>
-    
 PROCESSOR 16LF1613
 
 CONFIG FOSC = INTOSC
@@ -30,6 +28,7 @@ CONFIG WDTCCS = SWC
 ; - 0x073: increment low
 ; - 0x074: position high
 ; - 0x075: position low
+; - 0x076: volume adjustment to center
 ; - 0x078: square duty cycle
 ; general purpose memory:
 ; - 0x020-0x025: temporary storage for frequency multiplication: product
@@ -93,6 +92,11 @@ setVolume:
     lslf 0x71
     movf 0x0E, 0
     iorwf 0x71
+    ; set adjustment
+    movlw 0x7F
+    movwf 0x76
+    lsrf 0x71, 0
+    subwf 0x76
     goto done
     
 high_bits:
@@ -226,7 +230,7 @@ _main:
     movwf 0x26
     movlw 0
     movwf 0x27
-    movlw 145
+    movlw 147
     movwf 0x28
     ; Set up I/O pins
     movlb 3
@@ -258,10 +262,10 @@ _main:
     ; others so that they all take the same amount of time. This will allow us
     ; to use the instruction count as a stable clock for sample timings.
     ; Base clock time: 22 clocks
-    ; Base clock time + scaling: 59 clocks
+    ; Base clock time + scaling: 60 clocks
     ; Clock time for each type: 10 clocks
-    ; Clock time for each type + scaling: 47 clocks
-    ; Total clock time required: 69 clocks
+    ; Clock time for each type + scaling: 48 clocks
+    ; Total clock time required: 70 clocks
 loop:
     ; Check volume + frequency for all 0s: 11 clocks
     movf 0x71
@@ -296,17 +300,19 @@ ok2:
     
 none:
     ; Since there's no output, we can ignore clock timings and just loop back.
-    clrf 0x19 ; reset DAC output
+    movlw 0x7f
+    movwf 0x19 ; reset DAC output
     goto loop
     
 square:
-    ; Compare high position with duty cycle: 7 clocks
+    ; Compare high position with duty cycle: 8 clocks
     movf 0x78, 0
     subwf 0x74, 0
     movf 0x03, 0
     andlw 0x01
     addlw 0xFF ; 0 => 255, 1 => 0 + carry
     andwf 0x71, 0 ; AND with volume
+    addwf 0x76, 0 ; add adjustment
     movwf 0x19 ; write out
     ; Filler: 38 clocks
     ; Since the wait time is so high, use a loop
@@ -383,7 +389,7 @@ sine:
     goto scale_output
     
 noise:
-    ; Generate random sample: 12 clocks
+    ; Generate random sample: 13 clocks
     ; Uses NES noise algorithm
     ; 1. check if period has looped over (skip if not)
     btfss 0x03, 1
@@ -401,6 +407,7 @@ noise:
     movlw 0x00
     btfss 0x24, 0
     movf 0x71, 0
+    addwf 0x76, 0
     movwf 0x19 ; write out
     ; Filler: 33 clocks
     ; Since the wait time is so high, use a loop
@@ -426,7 +433,7 @@ skip_noise:
     goto next_loop
     
 scale_output:
-    ; Multiply unscaled output by volume + output: 37 clocks
+    ; Multiply unscaled output by volume + output: 38 clocks
     ; from http://www.piclist.com/techref/microchip/math/mul/8x8.htm
 mult    MACRO
     btfsc   0x03, 0
@@ -448,6 +455,7 @@ ENDM
     mult                            ;* 4 cycles
     mult                            ;* 4 cycles
     movf 0x20, 0
+    addwf 0x76, 0
     movwf 0x19
     
 next_loop:
