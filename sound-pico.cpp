@@ -1,9 +1,8 @@
 /*
- * sound-pico.cpp plugin for CraftOS-PC
- * Adds an interface between the original CraftOS-PC sound plugin and an auxiliary sound generation board over a serial connection.
- * THIS REQUIRES PROPER CONFIGURATION TO WORK! Assumes a Linux system with a USB serial port. Requires root to run.
- * Windows: cl /EHsc /Fesound-pico.dll /LD /Icraftos2\api /Icraftos2\craftos2-lua\include sound-pico.cpp /link craftos2\craftos2-lua\src\lua51.lib
- * Linux: g++ -fPIC -shared -Icraftos2/api -Icraftos2/craftos2-lua/include -o sound-pico.so sound-pico.cpp craftos2/craftos2-lua/src/liblua.a
+ * sound-midi.cpp plugin for CraftOS-PC
+ * Adds an interface between the original CraftOS-PC sound plugin and an auxiliary sound generation board over a MIDI connection.
+ * Windows: cl /EHsc /Fesound-midi.dll /LD /Icraftos2\api /Icraftos2\craftos2-lua\include sound-midi.cpp /link craftos2\craftos2-lua\src\lua51.lib
+ * Linux: g++ -fPIC -shared -Icraftos2/api -Icraftos2/craftos2-lua/include -o sound-midi.so sound-midi.cpp craftos2/craftos2-lua/src/liblua.a
  * Licensed under the MIT license.
  *
  * MIT License
@@ -30,12 +29,32 @@
  */
 
 #include <CraftOS-PC.hpp>
+#include <portmidi.h>
+#include <thread>
 #include <cmath>
 #include <termios.h>
-#define NUM_CHANNELS 32
+
+#define NUM_CHANNELS 16
 #define channelGroup(id) ((id) | 0x74A800)
-#define command(cmd, ch) (((cmd) << 5) | ((ch)-1))
-#define reset "\xE0\xE0\xE0\xE0\xE0"
+
+#define MESSAGE_NOTE_OFF        0x80
+#define MESSAGE_NOTE_ON         0x90
+#define MESSAGE_POLY_AFTERTOUCH 0xA0
+#define MESSAGE_CONTROL_CHANGE  0xB0
+#define MESSAGE_PROGRAM_CHANGE  0xC0
+#define MESSAGE_AFTERTOUCH      0xD0
+#define MESSAGE_PITCH_BEND      0xE0
+#define MESSAGE_SYSTEM          0xF0
+
+#define CONTROL_CHANGE_DUTY     1
+#define CONTROL_CHANGE_VOLUME   7
+#define CONTROL_CHANGE_PAN      10
+#define CONTROL_CHANGE_CLOCK    16
+#define CONTROL_CHANGE_FREQ_MSB 24
+#define CONTROL_CHANGE_FREQ_LSB 56
+#define CONTROL_CHANGE_ALL_OFF  123
+#define CONTROL_CHANGE_MONO     126
+#define CONTROL_CHANGE_POLY     127
 
 enum class WaveType {
     None,
@@ -46,7 +65,7 @@ enum class WaveType {
     Square,
     Noise,
     Custom,
-    PitchedNoise
+    PitchedNoise = 22
 };
 
 enum class InterpolationMode {
@@ -69,12 +88,30 @@ struct ChannelInfo {
 
 static const PluginFunctions * func;
 constexpr int ChannelInfo::identifier;
-static FILE * output = NULL;
-static std::mutex output_lock;
+static PortMidiStream * stream = NULL;
+static std::chrono::system_clock::time_point startTime;
 
 static void ChannelInfo_destructor(Computer * comp, int id, void* data) {
     ChannelInfo * channels = (ChannelInfo*)data;
     delete[] channels;
+}
+
+#define trigger_time milliseconds(NULL)
+static PmTimestamp milliseconds(void *time_info) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - startTime).count();
+}
+
+static void sendMessage(uint8_t message, uint8_t channel, uint8_t param1, uint8_t param2) {
+    Pm_WriteShort(stream, trigger_time, Pm_Message(message | channel, param1, param2));
+}
+
+static void sendDualMessage(uint8_t message, uint8_t channel, uint8_t param1, uint8_t param2, uint8_t message2, uint8_t channel2, uint8_t param12, uint8_t param22) {
+    PmEvent e[2];
+    e[0].message = Pm_Message(message | channel, param1, param2);
+    e[0].timestamp = trigger_time;
+    e[1].message = Pm_Message(message2 | channel2, param12, param22);
+    e[1].timestamp = trigger_time;
+    Pm_Write(stream, e, 2);
 }
 
 /*
@@ -120,6 +157,8 @@ static int sound_setWaveType(lua_State *L) {
     ChannelInfo * info = (ChannelInfo*)get_comp(L)->userdata[ChannelInfo::identifier] + (channel - 1);
     std::string type = luaL_checkstring(L, 2);
     std::transform(type.begin(), type.end(), type.begin(), tolower);
+    WaveType old = info->wavetype;
+    double oldduty = info->duty;
     if (type == "none") info->wavetype = WaveType::None;
     else if (type == "sine") info->wavetype = WaveType::Sine;
     else if (type == "triangle") info->wavetype = WaveType::Triangle;
@@ -154,20 +193,16 @@ static int sound_setWaveType(lua_State *L) {
         info->customWaveSize = i;
     } else if (type == "pitched_noise" || type == "pitchedNoise" || type == "pnoise") info->wavetype = WaveType::PitchedNoise;
     else luaL_error(L, "bad argument #2 (invalid option '%s')", type.c_str());
-    std::lock_guard<std::mutex> lock(output_lock);
-    if (info->wavetype == WaveType::Square) {
-        fputc(command(0, channel), output);
-        fputc((int)info->wavetype, output);
-        fputc(info->duty * 255, output);
-    } else if (info->wavetype == WaveType::Custom) {
-        /*fputc(command(0, channel), output);
-        fputc((int)info->wavetype | (((info->customWaveSize - 1) >> 1) & 0x80), output);
-        fputc((info->customWaveSize - 1) & 0xFF, output);*/
-    } else {
-        fputc(command(0, channel), output);
-        fputc((int)info->wavetype, output);
+    if (info->wavetype != old || info->duty != oldduty) {
+        if (info->wavetype == WaveType::Square) {
+            sendMessage(MESSAGE_CONTROL_CHANGE, channel - 1, CONTROL_CHANGE_DUTY, info->duty * 127);
+            if (old != WaveType::Square) sendMessage(MESSAGE_PROGRAM_CHANGE, channel - 1, (uint8_t)info->wavetype, 0);
+        } else if (info->wavetype == WaveType::Custom) {
+            /*fputc(command(0, channel), output);
+            fputc((int)info->wavetype | (((info->customWaveSize - 1) >> 1) & 0x80), output);
+            fputc((info->customWaveSize - 1) & 0xFF, output);*/
+        } else sendMessage(MESSAGE_PROGRAM_CHANGE, channel - 1, (uint8_t)info->wavetype, 0);
     }
-    fflush(output);
     return 0;
 }
 
@@ -195,12 +230,14 @@ static int sound_setFrequency(lua_State *L) {
     ChannelInfo * info = (ChannelInfo*)get_comp(L)->userdata[ChannelInfo::identifier] + (channel - 1);
     lua_Integer frequency = luaL_checkinteger(L, 2);
     if (frequency < 0 || frequency > 65535) luaL_error(L, "bad argument #2 (frequency out of range)");
-    info->frequency = frequency;
-    uint16_t freq = frequency;
-    std::lock_guard<std::mutex> lock(output_lock);
-    fputc(command(1, channel), output);
-    fwrite(&freq, 2, 1, output);
-    fflush(output);
+    if (info->frequency != frequency) {
+        info->frequency = frequency;
+        uint16_t freq = frequency & 0x3FFF;
+        sendDualMessage(
+            MESSAGE_CONTROL_CHANGE, channel - 1, CONTROL_CHANGE_FREQ_LSB, freq & 0x7F,
+            MESSAGE_CONTROL_CHANGE, channel - 1, CONTROL_CHANGE_FREQ_MSB, freq >> 7
+        );
+    }
     return 0;
 }
 
@@ -228,11 +265,10 @@ static int sound_setVolume(lua_State *L) {
     ChannelInfo * info = (ChannelInfo*)get_comp(L)->userdata[ChannelInfo::identifier] + (channel - 1);
     float amplitude = luaL_checknumber(L, 2);
     if (amplitude < 0.0 || amplitude > 1.0) luaL_error(L, "bad argument #2 (volume out of range)");
-    info->amplitude = amplitude;
-    std::lock_guard<std::mutex> lock(output_lock);
-    fputc(command(2, channel), output);
-    fputc(amplitude * 255, output);
-    fflush(output);
+    if (abs(info->amplitude - amplitude) >= .0078125) {
+        info->amplitude = amplitude;
+        sendMessage(MESSAGE_CONTROL_CHANGE, channel - 1, CONTROL_CHANGE_VOLUME, amplitude * 127);
+    }
     return 0;
 }
 
@@ -261,10 +297,7 @@ static int sound_setPan(lua_State *L) {
     float pan = luaL_checknumber(L, 2);
     if (pan < -1.0 || pan > 1.0) luaL_error(L, "bad argument #2 (pan out of range)");
     info->pan = pan;
-    std::lock_guard<std::mutex> lock(output_lock);
-    /*fputc(command(3, channel), output);
-    fputc(pan * (pan < 0 ? 128 : 127), output);
-    fflush(output);*/
+    sendMessage(MESSAGE_CONTROL_CHANGE, channel - 1, CONTROL_CHANGE_PAN, (pan + 1.0) * 63.5);
     return 0;
 }
 
@@ -307,10 +340,7 @@ static int sound_setInterpolation(lua_State *L) {
             default: luaL_error(L, "bad argument #2 (invalid option %d)", lua_tointeger(L, 2));
         }
     }
-    std::lock_guard<std::mutex> lock(output_lock);
-    fputc(command(4, channel), output);
-    fputc(info->interpolation == InterpolationMode::Linear ? 1 : 0, output);
-    fflush(output);
+    // not implemented
     return 0;
 }
 
@@ -324,10 +354,9 @@ static int sound_fadeOut(lua_State *L) {
     if (channel < 1 || channel > NUM_CHANNELS) luaL_error(L, "bad argument #1 (channel out of range)");
     ChannelInfo * info = (ChannelInfo*)get_comp(L)->userdata[ChannelInfo::identifier] + (channel - 1);
     float time = luaL_checknumber(L, 2);
-    std::lock_guard<std::mutex> lock(output_lock);
-    fputc(command(5, channel), output);
-    fwrite(&time, 4, 1, output);
-    fflush(output);
+    if (time > (127.0/64.0)) time = 127.0/64.0;
+    else if (time <= 0) return 0;
+    sendMessage(MESSAGE_NOTE_OFF, channel - 1, 0, 127 - floor(time * 64));
     return 0;
 }
 
@@ -347,13 +376,6 @@ static luaL_Reg sound_lib[] = {
     {NULL, NULL}
 };
 
-static Uint32 timer(Uint32 interval, void* param) {
-    std::lock_guard<std::mutex> lock(output_lock);
-    fwrite(reset, sizeof(reset)-1, 1, output);
-    fflush(output);
-    return interval;
-}
-
 extern "C" {
 #ifdef _WIN32
 _declspec(dllexport)
@@ -361,14 +383,20 @@ _declspec(dllexport)
 PluginInfo * plugin_init(const PluginFunctions * func, const path_t& path) {
     if (func->abi_version != PLUGIN_VERSION) return &info;
     ::func = func;
-    output = fopen("/dev/ttyACM0", "wb");
-    setvbuf(output, NULL, _IOFBF, 4096);
-    struct termios tty;
-    tcgetattr(fileno(output), &tty);
-    cfsetspeed(&tty, B115200);
-    cfmakeraw(&tty);
-    tcsetattr(fileno(output), TCSANOW, &tty);
-    SDL_AddTimer(50, timer, NULL);
+    startTime = std::chrono::system_clock::now();
+    PmError error;
+    if ((error = Pm_Initialize()) != pmNoError) throw std::runtime_error(std::string("Could not init: ") + Pm_GetErrorText(error));
+    for (int i = 0; i < Pm_CountDevices(); i++) {
+        const PmDeviceInfo * inf = Pm_GetDeviceInfo(i);
+        if (inf == NULL) throw std::invalid_argument("No PSG device found");
+        if (inf->output && strstr(inf->name, "PSG")) {
+            if ((error = Pm_OpenOutput(&stream, i, NULL, 256, milliseconds, NULL, 10)) != pmNoError) throw std::runtime_error(std::string("Could not open: ") + Pm_GetErrorText(error));
+            printf("Opened MIDI device %s\n", inf->name);
+            break;
+        }
+    }
+    if (stream == NULL) throw std::invalid_argument("No PSG device found");
+    sendMessage(MESSAGE_CONTROL_CHANGE, 0, CONTROL_CHANGE_MONO, 0);
     return &info;
 }
 
@@ -395,6 +423,9 @@ int luaopen_sound(lua_State *L) {
 _declspec(dllexport)
 #endif
 void plugin_deinit(PluginInfo * info) {
-    fclose(output);
+    sendMessage(MESSAGE_CONTROL_CHANGE, 0, CONTROL_CHANGE_POLY, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Pm_Close(stream);
+    Pm_Terminate();
 }
 }

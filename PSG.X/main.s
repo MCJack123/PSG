@@ -15,10 +15,10 @@ CONFIG BORV = LO
 CONFIG LPBOR = OFF
 CONFIG LVP = ON
     
-CONFIG WDTCPS = WDTCPS1F
-CONFIG WDTE = OFF
-CONFIG WDTCWS = WDTCWSSW
-CONFIG WDTCCS = SWC
+CONFIG WDTCPS = WDTCPS2
+CONFIG WDTE = SWDTEN
+CONFIG WDTCWS = WDTCWS100
+CONFIG WDTCCS = LFINTOSC
     
 ; memory allocations:
 ; common memory:
@@ -30,6 +30,7 @@ CONFIG WDTCCS = SWC
 ; - 0x075: position low
 ; - 0x076: volume adjustment to center
 ; - 0x078: square duty cycle
+; - 0x079: if set on WDT reset, do full reset
 ; general purpose memory:
 ; - 0x020-0x025: temporary storage for frequency multiplication: product
 ; - 0x026-0x028: permanent storage for frequency multiplication: multiplier
@@ -46,12 +47,17 @@ _interrupt:
     ; for some reason the assembler puts the code two words behind the actual IV
     nop
     nop
+    ; enable WDT for interrupt
+    movlb 14
+    bsf 0x11, 0
+    clrf 0x79
+    ; wait for clock
     movlb 0
     btfss 0x0C, 1 ; loop while bit 1 is not set
     bra -2
     
     btfsc 0x0C, 5
-    goto high_bits
+    goto setClock
     btfsc 0x0C, 4
     goto setVolume
 setWaveType:
@@ -79,19 +85,11 @@ setWaveType:
     goto done
     
 setVolume:
-    ; wait for next clock
-    btfsc 0x0C, 1 ; loop while bit 1 is set
-    bra -2
-    btfss 0x0C, 1 ; loop while bit 1 is not set
-    bra -2
     ; set volume
-    movf 0x0C, 0
-    andlw 0x30
+    movf 0x0E, 0
     movwf 0x71
     lslf 0x71
     lslf 0x71
-    movf 0x0E, 0
-    iorwf 0x71
     ; set adjustment
     movlw 0x7F
     movwf 0x76
@@ -99,110 +97,91 @@ setVolume:
     subwf 0x76
     goto done
     
-high_bits:
-    btfsc 0x0C, 4
-    reset ; instruction == 0b11 => reset the processor
-setFrequency:
-    ; set high freq
+setClock:
+    btfss 0x0C, 4
+    goto setIncrement
+    ; reset if cmd = 0xFF
     movf 0x0E, 0
-    movwf 0x23
+    xorlw 0x3F
+    btfsc 0x03, 2
+    goto sysCommand
+    ; calculate register value: (~C | 0x18) << 3
+    comf 0x0E, 0
+    iorlw 0x18
+    lslf 0x09
+    lslf 0x09
+    lslf 0x09
+    ; set clock frequency
+    movlb 1
+    movwf 0x19
+    goto done
+    
+setIncrement:
+    ; set high incr
+    movf 0x0E, 0
+    movwf 0x72
     
     ; wait for next clock
     btfsc 0x0C, 1 ; loop while bit 1 is set
     bra -2
     btfss 0x0C, 1 ; loop while bit 1 is not set
     bra -2
-    ; set low freq
+    ; set low incr
     movf 0x0C, 0
     andlw 0x30
-    movwf 0x24
-    lslf 0x24
-    lslf 0x24
-    movf 0x0E, 0
-    iorwf 0x24
-    clrf 0x25
-    ;goto done ; debugging
-    
-    ; from http://www.piclist.com/techref/microchip/math/mul/24x24b-tk.htm
-    ;24 x 24 Multiplication
-    ;Input:
-    ; Multiplier - 3 bytes (shared with Product)
-    ; Multiplicand - 3 bytes (not modified)
-    ;Temporary:
-    ; Bitcount
-    ;Output:
-    ; Product - 6 bytes
-
-    CLRF    0x20            ; clear destination
-    CLRF    0x21
-    CLRF    0x22
-
-
-    MOVLW   24
-    MOVWF   0x29            ; number of bits
-
-    RRF     0x23,F          ; shift out to carry
-    RRF     0x24,F          ; next multiplier bit
-    RRF     0x25,F
-
-ADD_LOOP_24x24:
-
-    BTFSS   0x03,0          ; if carry is set we must add multipland
-			    ; to the product
-      GOTO  SKIP_LOOP_24x24 ; nope, skip this bit
-
-    MOVF    0x28,W          ; get LSB of multiplicand
-    ADDWF   0x22,F          ; add it to the lsb of the product
-
-    MOVF    0x27,W          ; middle byte
-    BTFSC   0x03,0          ; check carry for overflow
-    INCFSZ  0x27,W          ; if carry set we add one to the source 
-    ADDWF   0x21,F          ; and add it  (if not zero, in
-			    ; that case mulitpland = 0xff->0x00 )
-
-    MOVF    0x26,W          ; MSB byte
-    BTFSC   0x03,0          ; check carry
-    INCFSZ  0x26,W
-    ADDWF   0x20,F          ; handle overflow
-
-SKIP_LOOP_24x24:
-    ; note carry contains most significant bit of
-    ; addition here
-
-    ; shift in carry and shift out
-    ; next multiplier bit, starting from less
-    ; significant bit
-
-    RRF     0x20,F
-    RRF     0x21,F
-    RRF     0x22,F
-    RRF     0x23,F
-    RRF     0x24,F
-    RRF     0x25,F
-
-    DECFSZ  0x29,F
-    GOTO    ADD_LOOP_24x24
-    
-    ; move the result into permanent memory
-    movf 0x22, 0
-    movwf 0x72
-    movf 0x23, 0
     movwf 0x73
-    ; round result
-    btfsc 0x24, 7
-    incf 0x73
-    btfsc 0x03, 2
-    incf 0x72
+    lslf 0x73
+    lslf 0x73
+    movf 0x0E, 0
+    iorwf 0x73
     
 done:
-    ; Reset interrupt register and return
+    ; Reset interrupt register, disable WDT and return
+    movlb 14
+    bcf 0x11, 0
     movlw 0x90
     movwf 0x0B
+    clrf 0x79
     retfie
+    
+sysCommand:
+    ; system commands:
+    ; 0xFF [0x00]: reset
+    ; 0xFF 0x01: enter bootloader
+    ; others: ignore & exit
+    bsf 0x79, 0 ; do full reset on no command
+    ; wait for next clock
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; run command
+    movf 0x0E, 0
+    btfsc 0x03, 2 ; 0
+    reset
+    movwf 0x7A
+    decfsz 0x7A ; 1
+    bra 1
+    goto _bootloader
+    decfsz 0x7A ; 1
+    bra 1
+    goto _bootloader
+    goto done ; others
     
 psect init,class=CODE,delta=2 ; PIC10/12/16
 global _main
 _main:
+    ; Disable WDT & check for reset
+    movlb 14
+    bcf 0x11, 0
+    movlb 1
+    btfsc 0x16, 4 ; PCON:~RWDT
+    goto init
+    btfsc 0x79, 0
+    goto init
+    clrf 0x79
+    goto loop
+init:
     ; Set initial state
     movlb 0
     clrf 0x70
@@ -212,33 +191,25 @@ _main:
     clrf 0x74
     clrf 0x75
     clrf 0x78
+    clrf 0x79
     ; Debugging: pre-set wave
-    ;movlw 0x01
+    ;movlw 0x02
     ;movwf 0x70
     ;movlw 0xFF
     ;movwf 0x71
-    ;movlw 0x01
+    ;movlw 0x00
     ;movwf 0x72
-    ;movlw 0x28
+    ;movlw 0x3F
     ;movwf 0x73
     ;movlw 0x80
     ;movwf 0x78
-    ; !! CLOCK MULTIPLIER CONSTANT !!
-    ; This is a BE 24-bit number calculated with (16777216 * clocksPerLoop) / 8000000
-    ; UPDATE THIS IF MODIFYING THE RUN LENGTH OF THE LOOP CODE
-    movlw 0
-    movwf 0x26
-    movlw 0
-    movwf 0x27
-    movlw 147
-    movwf 0x28
     ; Set up I/O pins
     movlb 3
-    clrf 0x0C
-    clrf 0x0E
+    clrf 0x0C ; ANSELA
+    clrf 0x0E ; ANSELC
     movlb 4
-    clrf 0x0C
-    clrf 0x0E
+    clrf 0x0C ; WPUA
+    clrf 0x0E ; WPUC
     movlb 1
     movlw 0x36 ; TRISA5, TRISA4, TRISA2, TRISA1
     movwf 0x0C
@@ -302,6 +273,7 @@ none:
     ; Since there's no output, we can ignore clock timings and just loop back.
     movlw 0x7f
     movwf 0x19 ; reset DAC output
+    ;sleep ; nothing else will happen, so wait for interrupt
     goto loop
     
 square:
@@ -724,6 +696,264 @@ sine_table:
     retlw 118
     retlw 121
     retlw 124
+    
+psect bootldr,class=CODE,delta=2,size=0x100
+_bootloader:
+    ; Bootloader routine for quick batch programming (one-way)
+    ; Takes binary Intel HEX lines - 0x20 bytes per line (16 words)
+    ;   Addresses must be aligned to 0x20
+    ;   Less than 0x20 bytes = last bytes are erased
+    ; Wait 2-5 ms after sending the last byte of each row before checksum!
+    ; Wait the same amount of time after sending command 0x00 too!
+    ;
+    ; Memory allocation:
+    ; - 0x0070: Data length in bytes
+    ; - 0x0071: Temporary storage space, command type
+    ; - 0x0072: Temporary storage space
+    ; - 0x0073: Ignore write if set
+    
+    ; Disable WDT
+    movlb 14
+    bcf 0x11, 0
+    ; Set clock frequency to 32MHz
+    movlb 1
+    movlw 0xF8 ; SPLLEN, IRCF = 16 MHz, SCS = 0
+    movwf 0x19
+    ; Disable DAC
+    movlb 2
+    clrf 0x18
+    ; Disable interrupts
+    movlb 0
+    bcf 0x0B, 7
+    bsf 0x0C, 0
+    clrf 0x70
+    clrf 0x71
+    clrf 0x72
+    clrf 0x73
+    
+bootloader_start:
+    ; wait for next clock
+    movlb 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; set data length
+    movf 0x0C, 0
+    andlw 0x30
+    movwf 0x70
+    lslf 0x70
+    lslf 0x70
+    movf 0x0E, 0
+    iorwf 0x70
+    
+    ; wait for next clock
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; read upper address
+    movf 0x0C, 0
+    andlw 0x30
+    movwf 0x72
+    lslf 0x72
+    lslf 0x72
+    movf 0x0E, 0
+    iorwf 0x72
+    
+    ; wait for next clock
+    movlb 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; read lower address
+    movf 0x0C, 0
+    andlw 0x30
+    movlb 3
+    movwf 0x71
+    lslf 0x71
+    lslf 0x71
+    movlb 0
+    movf 0x0E, 0
+    movlb 3
+    iorwf 0x71
+    
+    ; write address to registers
+    bcf 0x03, 0 ; clear carry
+    rrf 0x72
+    rrf 0x71
+    movlb 3
+    movf 0x72, 0
+    movwf 0x12
+    movf 0x71, 0
+    movwf 0x11
+    
+    ; wait for next clock
+    movlb 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; read command type
+    movf 0x0C, 0
+    andlw 0x30
+    movwf 0x71
+    lslf 0x71
+    lslf 0x71
+    movf 0x0E, 0
+    iorwf 0x71
+    
+    ; execute command
+    btfsc 0x03, 2 ; 00
+    goto bootloader_write
+    decfsz 0x71   ; 01
+    bra 1
+    goto bootloader_end
+    decfsz 0x71   ; 02
+    bra 1
+    goto bootloader_ignore
+    decfsz 0x71   ; 03
+    bra 1
+    goto bootloader_ignore
+    decfsz 0x71   ; 04
+    goto err ; all other types - error
+    goto bootloader_mode
+    
+bootloader_write:
+    ; ignore config writes
+    btfsc 0x73, 0
+    goto bootloader_ignore
+    ;movlw 1
+    ;xorwf 0x0C
+    ; erase row
+    movlb 3
+    movlw 0x14 ; FREE, WREN
+    movwf 0x15 ; PMCON1
+    movlw 0x55
+    movwf 0x16
+    movlw 0xAA
+    movwf 0x16
+    bsf 0x15, 1 ; execute erase
+    nop ; 2-5ms pause
+    nop
+    movlw 0x24 ; LWLO, WREN
+    movwf 0x15 ; PMCON1
+    
+bootloader_write_loop:
+    ; wait for next clock
+    movlb 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; read low byte
+    movf 0x0C, 0
+    andlw 0x30
+    movwf 0x71
+    lslf 0x71
+    lslf 0x71
+    movf 0x0E, 0
+    iorwf 0x71, 0
+    movlb 3
+    movwf 0x13
+    decf 0x70
+    
+    ; wait for next clock
+    movlb 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; read high 6 bits
+    movf 0x0E, 0
+    movlb 3
+    movwf 0x14
+    decfsz 0x70 ; check if no more bytes to read
+    bra 1
+    goto bootloader_write_finish
+    
+    ; write to latch
+    movlw 0x55
+    movwf 0x16
+    movlw 0xAA
+    movwf 0x16
+    bsf 0x15, 1 ; execute write
+    nop
+    nop
+    incf 0x11 ; increment address
+    goto bootloader_write_loop
+    
+bootloader_write_finish:
+    bcf 0x15, 5 ; clear LWLO
+    movlw 0x55
+    movwf 0x16
+    movlw 0xAA
+    movwf 0x16
+    bsf 0x15, 1 ; execute write
+    nop ; 2-5ms pause
+    nop
+    bcf 0x15, 2
+    goto bootloader_checksum
+    
+bootloader_end:
+    reset
+    
+bootloader_mode:
+    ; can't set config bits from software, so ignore attempts to write to it
+    ; ignore high byte
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; set ignore if != 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    clrf 0x73
+    movf 0x0E
+    btfss 0x03, 2
+    bsf 0x73, 0
+    goto bootloader_checksum
+    
+bootloader_ignore:
+    ; loop until all bytes are consumed
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    decfsz 0x70
+    goto bootloader_ignore ; if > 0
+    goto bootloader_checksum ; if = 0
+    
+bootloader_checksum:
+    ; ignore for now
+    movlb 0
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    goto bootloader_start
+    
+err:
+    ; Disable DAC
+    movlb 2
+    clrf 0x18
+    movlb 0
+err2:
+    ; square wave of unknown frequency
+    bsf 0x0C, 0
+    decfsz 0x72
+    bra -2
+    decfsz 0x73
+    bra -4
+    bcf 0x0C, 0
+    decfsz 0x72
+    bra -2
+    decfsz 0x73
+    bra -4
+    goto err2
     
 psect reset_vec,class=CODE,delta=2
     PAGESEL _main

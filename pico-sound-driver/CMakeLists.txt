@@ -11,12 +11,13 @@ pico_sdk_init()
 
 add_executable(sound
     main.cpp
+    usb_descriptors.c
 )
 
 # Add pico_stdlib library which aggregates commonly used features
-target_link_libraries(sound pico_stdlib hardware_timer hardware_pwm hardware_gpio pico_sync pico_multicore pico_stdio_usb)
+target_link_libraries(sound pico_stdlib hardware_timer hardware_pwm hardware_gpio pico_sync pico_multicore pico_bootrom tinyusb_device)
 
-pico_enable_stdio_usb(sound 1)
+pico_enable_stdio_usb(sound 0)
 pico_enable_stdio_uart(sound 0)
 
 # create map/bin/hex/uf2 file in addition to ELF.
