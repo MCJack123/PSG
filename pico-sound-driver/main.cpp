@@ -77,7 +77,7 @@ ChannelInfo channels[NUM_CHANNELS];
 uint8_t typeconv[9] = {0, 5, 4, 2, 3, 1, 6, 0, 6};
 const double freqMultiplier = (65536.0 * CLOCKS_PER_LOOP) / 8000000.0;
 uint8_t midiChannels[16][128];
-WaveType midiPrograms[16] = {WaveType::None};
+WaveType midiPrograms[16] = {WaveType::Square};
 uint8_t midiDuty[16] = {128};
 uint8_t midiUsedChannels[NUM_CHANNELS] = {0xFF};
 bool midiMode = true;
@@ -522,6 +522,10 @@ void tud_midi_rx_cb(uint8_t itf) {
         } case 0xC0: { // program (wave type) change
             if (midiMode) {
                 midiPrograms[channel] = (WaveType)((packet.param1 - 1) & 7);
+                if (midiPrograms[channel] == WaveType::None) {
+                    midiPrograms[channel] = WaveType::Square;
+                    midiDuty[channel] = 128;
+                }
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
@@ -537,6 +541,10 @@ void tud_midi_rx_cb(uint8_t itf) {
                 }
             } else {
                 WaveType type = (WaveType)((packet.param1) & 7);
+                if (type == WaveType::None) {
+                    type = WaveType::Square;
+                    channels[channel].duty = 128;
+                }
                 channels[channel].wavetype = type;
                 command_queue[channel][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)type];
                 if (type == WaveType::Square) command_queue[channel][0][1] = channels[channel].duty * 255;
@@ -549,15 +557,15 @@ void tud_midi_rx_cb(uint8_t itf) {
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
-                        channels[c].amplitude = packet.param2 / 127.5;
-                        command_queue[c][2][0] = volume(packet.param2);
+                        channels[c].amplitude = packet.param1 / 127.5;
+                        command_queue[c][2][0] = volume(packet.param1);
                         command_updates[2] = true;
                         changed = true;
                     }
                 }
             } else {
-                channels[channel].amplitude = packet.param2 / 127.5;
-                command_queue[channel][2][0] = volume(packet.param2);
+                channels[channel].amplitude = packet.param1 / 127.5;
+                command_queue[channel][2][0] = volume(packet.param1);
                 command_updates[2] = true;
                 changed = true;
             }
@@ -727,6 +735,7 @@ int main() {
         command_queue[i][3][0] = 0xFF;
     }
     memset(midiChannels, 0xFF, 2048);
+    memset(midiUsedChannels, 0xFF, NUM_CHANNELS);
     tusb_init();
     multicore_launch_core1(core2);
     gpio_put(PICO_DEFAULT_LED_PIN, true);
