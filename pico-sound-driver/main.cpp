@@ -357,6 +357,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                     if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                         uint8_t c = midiChannels[channel][packet.param1];
                         channels[c].amplitude = 0;
+                        channels[c].fadeStart = 0;
                         command_queue[c][2][0] = COMMAND_VOLUME | 0;
                         command_updates[2] = true;
                         changed = true;
@@ -365,6 +366,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                     midiChannels[channel][packet.param1] = 0xFF;
                 } else {
                     channels[channel].amplitude = 0;
+                    channels[channel].fadeStart = 0;
                     command_queue[channel][2][0] = COMMAND_VOLUME | 0;
                     command_updates[2] = true;
                     changed = true;
@@ -530,6 +532,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
                         channels[c].wavetype = midiPrograms[channel];
+                        channels[c].fadeStart = 0;
                         command_queue[c][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)midiPrograms[channel]];
                         if (midiPrograms[channel] == WaveType::Square) {
                             channels[c].duty = midiDuty[channel] / 255.0;
@@ -546,6 +549,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                     channels[channel].duty = 128;
                 }
                 channels[channel].wavetype = type;
+                channels[channel].fadeStart = 0;
                 command_queue[channel][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)type];
                 if (type == WaveType::Square) command_queue[channel][0][1] = channels[channel].duty * 255;
                 command_updates[0] = true;
@@ -635,6 +639,7 @@ void tud_midi_rx_cb(uint8_t itf) {
 void core2() {
     while (true) {
         int64_t time = time_us_64();
+        mutex_enter_blocking(&command_queue_lock);
         for (int i = 0; i < NUM_CHANNELS; i++) {
             ChannelInfo * info = &channels[i];
             if (info->fadeStart > 0) {
@@ -653,7 +658,6 @@ void core2() {
                 changed = true;
             }
         }
-        mutex_enter_blocking(&command_queue_lock);
         if (changed) {
             changed = false;
             gpio_put(PICO_DEFAULT_LED_PIN, false);
