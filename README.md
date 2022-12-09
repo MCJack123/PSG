@@ -2,6 +2,7 @@
 This repo contains the source code for my programmable sound generation board. [Read the article for more info.](https://mcjack123.github.io/PSG/)
 
 ![PSG image](images/image3.jpg)
+![PSG image 2](part-2/images/image6.jpg)
 
 ## Contents
 * `board.fzz` is a Fritzing project file for a basic 4-channel version of the board.
