@@ -1,3 +1,15 @@
+/*
+ * programmer.cpp
+ * PSG
+ *
+ * This file contains a program for automatically uploading a firmware update to
+ * an attached PSG device. It can take a .uf2 (Pico only), .hex (PIC only), or
+ * .bin (combined) firmware file, and sends it to the device.
+ *
+ * This code is licensed under the GPLv2 license.
+ * Copyright (c) 2022-2023 JackMacWindows.
+ */
+
 #include <portmidi.h>
 #include <iostream>
 #include <fstream>

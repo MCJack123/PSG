@@ -1,3 +1,16 @@
+;
+; PSG.X/main.s
+; PSG
+;
+; This file contains the firmware for the PIC channel chips. It generates a
+; waveform of the specified type, volume, and frequency; responds to events from
+; an 8-bit data bus over A5/4 & D5-0; and can receive firmware updates from the
+; 8-bit data bus and write them to flash.
+;
+; This code is licensed under the GPLv2 license.
+; Copyright (c) 2022-2023 JackMacWindows.
+;
+
 PROCESSOR 16LF1613
 
 CONFIG FOSC = INTOSC

@@ -1,3 +1,15 @@
+/*
+ * pico-sound-driver/main.cpp
+ * PSG
+ *
+ * This file contains the firmware for the Raspberry Pi Pico. It handles parsing
+ * MIDI events and converting them into commands for each channel, as well as
+ * other miscellaneous functionality, such as fade out and PIC firmware updates.
+ *
+ * This code is licensed under the GPLv2 license.
+ * Copyright (c) 2022-2023 JackMacWindows.
+ */
+
 #include <hardware/gpio.h>
 #include <hardware/timer.h>
 #include <hardware/watchdog.h>
