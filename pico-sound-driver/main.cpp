@@ -20,12 +20,16 @@
 #include <math.h>
 #include <stdio.h>
 
+#define BOARD_VERSION_MAJOR 0
+#define BOARD_VERSION_MINOR 0
+
 #define NUM_CHANNELS 16
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 #define gpio_out(pin) gpio_init(pin); gpio_set_dir(pin, true)
+#define gpio_in(pin) gpio_init(pin); gpio_set_dir(pin, false)
 #define COMMAND_WAVE_TYPE 0x00
 #define COMMAND_VOLUME    0x40
 #define COMMAND_FREQUENCY 0x80
@@ -102,6 +106,7 @@ char hex_storage[0x1000];
 uint16_t hex_storage_size = 0;
 uint8_t inSysEx = 0;
 uint16_t sysExSize;
+uint8_t version_major, version_minor;
 
 template<typename T> static T min(T a, T b) {return a < b ? a : b;}
 template<typename T> static T max(T a, T b) {return a > b ? a : b;}
@@ -715,6 +720,12 @@ void core2() {
 
 int main() {
     gpio_init(PICO_DEFAULT_LED_PIN); gpio_set_dir(PICO_DEFAULT_LED_PIN, true);
+    gpio_in(0);
+    gpio_in(1);
+    gpio_in(2);
+    gpio_in(3);
+    gpio_in(4);
+    gpio_in(5);
     gpio_out(6);
     gpio_out(7);
     gpio_out(8);
@@ -727,6 +738,18 @@ int main() {
     gpio_out(PIN_STROBE);
     gpio_out(PIN_DATA);
     gpio_out(PIN_CLOCK);
+    // Check board version number (0-1 = major revision, 2-5 = minor revision)
+    // major mismatch = do not run, minor mismatch = disable features
+    version_major = (gpio_get(0) ? 2 : 0) + (gpio_get(1) ? 1 : 0);
+    if (version_major != BOARD_VERSION_MAJOR) {
+        while (true) {
+            gpio_put(PICO_DEFAULT_LED_PIN, true);
+            sleep_ms(500);
+            gpio_put(PICO_DEFAULT_LED_PIN, false);
+            sleep_ms(500);
+        }
+    }
+    version_minor = (gpio_get(2) ? 8 : 0) + (gpio_get(3) ? 4 : 0) + (gpio_get(4) ? 2 : 0) + (gpio_get(5) ? 1 : 0);
     gpio_put(PIN_DATA, false);
     sleep_us(1);
     for (int i = 0; i < 32; i++) {
