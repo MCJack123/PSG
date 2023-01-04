@@ -205,7 +205,22 @@ std::string getMountpoint() {
 void mountCleanup() {}
 
 #elif defined(__APPLE__)
-#error Not implemented
+
+#include <sys/stat.h>
+
+std::string getMountpoint() {
+    // wait for RPI-RP2 drive
+    struct stat st;
+    while (true) {
+        if (stat("/Volumes/RPI-RP2", &st) == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    return "/Volumes/RPI-RP2";
+}
+
+void mountCleanup() {}
+
 #else
 #error Unsupported platform
 #endif

@@ -6,7 +6,7 @@
             <name>PSG</name>
             <creation-uuid>de9a34d8-9340-4c87-8fe8-2cb13234001b</creation-uuid>
             <make-project-type>0</make-project-type>
-            <c-extensions>c</c-extensions>
+            <c-extensions/>
             <cpp-extensions/>
             <header-extensions/>
             <asminc-extensions/>

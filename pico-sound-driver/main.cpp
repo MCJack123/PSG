@@ -21,9 +21,10 @@
 #include <stdio.h>
 
 #define BOARD_VERSION_MAJOR 0
-#define BOARD_VERSION_MINOR 0
+#define BOARD_VERSION_MINOR 1
 
-#define NUM_CHANNELS 16
+#define MAX_CHANNELS 16
+#define NUM_CHANNELS (dualChannel ? MAX_CHANNELS / 2 : MAX_CHANNELS)
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -41,7 +42,6 @@
 
 #define sleep_us_sr(n) sleep_us((n))
 #define sleep_us_pic(n) sleep_us((n))
-#define volume(n) (COMMAND_VOLUME | (uint8_t)floor(13.0 * log((n) + 1) + 0.5))
 
 // !! CLOCK MULTIPLIER CONSTANT !!
 // UPDATE THIS IF MODIFYING THE RUN LENGTH OF THE LOOP CODE
@@ -64,22 +64,51 @@ enum class InterpolationMode {
     Linear
 };
 
+struct Point {
+    uint16_t x, y;
+};
+
+struct Envelope {
+    Point points[12];
+    uint8_t npoints = 0;
+    uint8_t sustain = 0xFF;
+    uint8_t loopStart = 0xFF;
+    uint8_t loopEnd = 0xFF;
+};
+
+struct Instrument {
+    Envelope volume;
+    Envelope pan;
+    Envelope frequency;
+    Envelope duty;
+    uint8_t waveTypes[4] = {0, 0, 0, 0};
+};
+
 struct ChannelInfo {
+    // current status fields
     double position = 0.0;
     WaveType wavetype = WaveType::None;
     double duty = 0.5;
     unsigned int frequency = 0;
     double amplitude = 1.0;
     float pan = 0.0;
+    // fade fields
     double fadeInit = 0.0;
     int64_t fadeStart = 0;
     int64_t fadeLength = 0;
     int fadeDirection = -1;
+    // sound 2.0 (probably irrelevant here)
     double customWave[512];
     int customWaveSize;
     InterpolationMode interpolation;
     bool isLowFreq = false;
     uint8_t note = 0;
+    // instrument fields
+    Instrument * inst = NULL;
+    uint16_t ticks[4] = {0, 0, 0, 0};
+    uint8_t points[4] = {0, 0, 0, 0};
+    uint8_t typeIndex = 0;
+    bool release = false;
 };
 
 struct MidiPacket {
@@ -89,27 +118,117 @@ struct MidiPacket {
     uint8_t param2;
 };
 
-ChannelInfo channels[NUM_CHANNELS];
+ChannelInfo channels[MAX_CHANNELS];
 uint8_t typeconv[9] = {0, 5, 4, 2, 3, 1, 6, 0, 6};
 const double freqMultiplier = (65536.0 * CLOCKS_PER_LOOP) / 8000000.0;
 uint8_t midiChannels[16][128];
-WaveType midiPrograms[16] = {WaveType::Square};
+int midiPrograms[16] = {0};
 uint8_t midiDuty[16] = {128};
-uint8_t midiUsedChannels[NUM_CHANNELS] = {0xFF};
+uint8_t midiUsedChannels[MAX_CHANNELS] = {0xFF};
 bool midiMode = true;
-uint8_t command_queue[NUM_CHANNELS][4][2];
+uint8_t command_queue[MAX_CHANNELS][4][2];
 bool command_updates[4] = {false};
 mutex_t command_queue_lock;
 bool changed = false;
-uint8_t freq_lsb[NUM_CHANNELS] = {0};
-char hex_storage[0x1000];
+uint8_t freq_lsb[MAX_CHANNELS] = {0};
+char hex_storage[0x4000];
 uint16_t hex_storage_size = 0;
 uint8_t inSysEx = 0;
 uint16_t sysExSize;
 uint8_t version_major, version_minor;
+bool stereo = false, dualChannel = false;
+Instrument patches[128];
+
+/*
+ * Base64 encoding/decoding (RFC1341)
+ * Copyright (c) 2005-2011, Jouni Malinen <j@w1.fi>
+ *
+ * This software may be distributed under the terms of the BSD license.
+ * See README for more details.
+ */
+
+static const uint8_t base64_table[65] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * base64_decode - Base64 decode
+ * @src: Data to be decoded
+ * @len: Length of the data to be decoded
+ * @out: Pointer to output variable
+ * @out_len: Length of output buffer
+ * Returns: 0 on success, non-0 on error
+ */
+int base64_decode(const uint8_t *src, size_t len, uint8_t *out, size_t out_len) {
+    static uint8_t dtable[256];
+    static uint8_t dtable_done = 0;
+	uint8_t *pos, block[4], tmp;
+	size_t i, count, olen;
+	int pad = 0;
+    if (!dtable_done) {
+        for (i = 0; i < 256; i++) dtable[i] = 0x80;
+        for (i = 0; i < sizeof(base64_table) - 1; i++) dtable[base64_table[i]] = (uint8_t)i;
+        dtable['='] = 0;
+        dtable_done = 1;
+    }
+	count = 0;
+	for (i = 0; i < len; i++) if (dtable[src[i]] != 0x80) count++;
+	if (count == 0 || count % 4) return 1;
+	olen = count / 4 * 3;
+    if (out_len < olen) return 2;
+	pos = out;
+	count = 0;
+	for (i = 0; i < len; i++) {
+		tmp = dtable[src[i]];
+		if (tmp == 0x80) continue;
+		if (src[i] == '=') pad++;
+		block[count] = tmp;
+		count++;
+		if (count == 4) {
+			*pos++ = (block[0] << 2) | (block[1] >> 4);
+			if (pad != 2) *pos++ = (block[1] << 4) | (block[2] >> 2);
+			if (pad == 0) *pos++ = (block[2] << 6) | block[3];
+			count = 0;
+		}
+	}
+	return 0;
+}
 
 template<typename T> static T min(T a, T b) {return a < b ? a : b;}
 template<typename T> static T max(T a, T b) {return a > b ? a : b;}
+
+void writeWaveType(uint8_t c, WaveType type, uint8_t duty = 128) {
+    command_queue[c][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)type];
+    if (type == WaveType::Square) command_queue[c][0][1] = duty;
+    if (dualChannel) {
+        command_queue[c+8][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)type];
+        if (type == WaveType::Square) command_queue[c+8][0][1] = duty;
+    }
+    command_updates[0] = true;
+    changed = true;
+}
+
+void writeFrequency(uint8_t c, uint16_t freq) {
+    freq = (uint16_t)floor(freq * freqMultiplier + 0.5);
+    command_queue[c][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
+    command_queue[c][1][1] = freq & 0xFF;
+    if (dualChannel) {
+        command_queue[c+8][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
+        command_queue[c+8][1][1] = freq & 0xFF;
+    }
+    command_updates[1] = true;
+    changed = true;
+}
+
+void writeVolume(uint8_t c, uint8_t vol) {
+    if (dualChannel) {
+        command_queue[c][2][0] = COMMAND_VOLUME | (uint8_t)floor(13.0 * log(vol * min(channels[c].pan + 1.0f, 1.0f) + 1) + 0.5);
+        command_queue[c+8][2][0] = COMMAND_VOLUME | (uint8_t)floor(13.0 * log(vol * min(1.0f - channels[c].pan, 1.0f) + 1) + 0.5);
+    } else {
+        command_queue[c][2][0] = COMMAND_VOLUME | (uint8_t)floor(13.0 * log(vol + 1) + 0.5);
+    }
+    command_updates[2] = true;
+    changed = true;
+}
 
 void write_data(uint8_t c, uint8_t data) {
     gpio_put(6, data & 0x80);
@@ -291,8 +410,8 @@ void tud_midi_rx_cb(uint8_t itf) {
                 }
                 inSysEx = packet.param1 + 1;
                 // ignore param2
-                if (inSysEx == 1) {
-                    memset(hex_storage, 0, 0x1000);
+                if (inSysEx == 1 || inSysEx == 3) {
+                    memset(hex_storage, 0, 0x4000);
                     hex_storage_size = 0;
                 } else if (inSysEx == 2) {
                     // boot to bootloader
@@ -308,6 +427,16 @@ void tud_midi_rx_cb(uint8_t itf) {
                     inSysEx = 0;
                     loadhex(hex_storage, hex_storage_size);
                 }
+            } else if (inSysEx == 3) {
+                // load instrument envelope
+                uint8_t s = packet.usbcode & 0x03;
+                if (s != 1) hex_storage[hex_storage_size++] = packet.command;
+                if (s == 0 || s == 3) hex_storage[hex_storage_size++] = packet.param1;
+                if (s == 0) hex_storage[hex_storage_size++] = packet.param2;
+                if (s != 0) {
+                    inSysEx = 0;
+                    base64_decode((const uint8_t*)hex_storage + 1, hex_storage_size - 1, (uint8_t*)&patches[hex_storage[0]], sizeof(Instrument) + 3);
+                }
             } else { // unrecognized vendor/command
                 if (packet.usbcode & 0x03) inSysEx = 0;
             }
@@ -321,34 +450,24 @@ void tud_midi_rx_cb(uint8_t itf) {
                     if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                         uint8_t c = midiChannels[channel][packet.param1];
                         channels[c].amplitude = packet.param2 / 127.5;
-                        command_queue[c][2][0] = volume(packet.param2);
-                        command_updates[2] = true;
-                        changed = true;
                         break;
                     }
                     for (int c = 0; c < NUM_CHANNELS; c++) {
-                        if (midiUsedChannels[c] == 0xFF) {
+                        if (midiUsedChannels[c] == 0xFF && channels[c].inst == NULL) {
                             midiUsedChannels[c] = channel;
                             midiChannels[channel][packet.param1] = c;
                             uint16_t freq = (uint16_t)floor(pow(2.0, ((double)packet.param1 - 69.0) / 12.0) * 440.0 + 0.5);
                             channels[c].amplitude = packet.param2 / 127.5;
                             channels[c].frequency = freq;
-                            channels[c].wavetype = midiPrograms[channel];
+                            channels[c].wavetype = (WaveType)patches[midiPrograms[channel]].waveTypes[0];
                             channels[c].note = packet.param1;
                             channels[c].fadeStart = 0;
-                            freq = (uint16_t)floor(freq * freqMultiplier + 0.5);
-                            command_queue[c][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
-                            command_queue[c][1][1] = freq & 0xFF;
-                            command_queue[c][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)midiPrograms[channel]];
-                            if (midiPrograms[channel] == WaveType::Square) {
-                                channels[c].duty = midiDuty[channel] / 255.0;
-                                command_queue[c][0][1] = midiDuty[channel];
-                            }
-                            command_queue[c][2][0] = volume(packet.param2);
-                            command_updates[0] = true;
-                            command_updates[1] = true;
-                            command_updates[2] = true;
-                            changed = true;
+                            channels[c].inst = &patches[midiPrograms[channel]];
+                            channels[c].points[0] = channels[c].points[1] = channels[c].points[2] = channels[c].points[3] = 0;
+                            channels[c].ticks[0] = channels[c].ticks[1] = channels[c].ticks[2] = channels[c].ticks[3] = 0;
+                            channels[c].release = false;
+                            if (channels[c].wavetype == WaveType::Square) channels[c].duty = midiDuty[channel] / 255.0;
+                            writeWaveType(c, channels[c].wavetype, midiDuty[channel]);
                             break;
                         }
                     }
@@ -356,15 +475,9 @@ void tud_midi_rx_cb(uint8_t itf) {
                     uint16_t freq = (uint16_t)floor(pow(2.0, (packet.param1 - 69.0) / 12.0) * 440 + 0.5);
                     channels[channel].amplitude = packet.param2 / 127.5;
                     channels[channel].frequency = freq;
-                    channels[channel].fadeStart = 0;
-                    
-                    freq = (uint16_t)floor(freq * freqMultiplier + 0.5);
-                    command_queue[channel][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
-                    command_queue[channel][1][1] = freq & 0xFF;
-                    command_queue[channel][2][0] = volume(packet.param2);
-                    command_updates[1] = true;
-                    command_updates[2] = true;
-                    changed = true;
+                    channels[channel].fadeStart = 0; 
+                    writeFrequency(channel, freq);
+                    writeVolume(channel, packet.param2);
                 }
                 break;
             } // fall through
@@ -373,20 +486,20 @@ void tud_midi_rx_cb(uint8_t itf) {
                 if (midiMode) {
                     if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                         uint8_t c = midiChannels[channel][packet.param1];
-                        channels[c].amplitude = 0;
-                        channels[c].fadeStart = 0;
-                        command_queue[c][2][0] = COMMAND_VOLUME | 0;
-                        command_updates[2] = true;
-                        changed = true;
+                        if (channels[c].inst == NULL) {
+                            channels[c].amplitude = 0;
+                            channels[c].fadeStart = 0;
+                            writeVolume(c, 0);
+                        } else {
+                            channels[c].release = true;
+                        }
                         midiUsedChannels[c] = 0xFF;
                     }
                     midiChannels[channel][packet.param1] = 0xFF;
                 } else {
                     channels[channel].amplitude = 0;
                     channels[channel].fadeStart = 0;
-                    command_queue[channel][2][0] = COMMAND_VOLUME | 0;
-                    command_updates[2] = true;
-                    changed = true;
+                    writeVolume(channel, 0);
                 }
             } else {
                 if (midiMode) {
@@ -396,6 +509,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                         channels[c].fadeStart = time_us_64();
                         channels[c].fadeDirection = -1;
                         channels[c].fadeLength = (127 - packet.param2) * (1000000/64);
+                        channels[c].inst = NULL;
                     }
                     midiChannels[channel][packet.param1] = 0xFF;
                 } else {
@@ -411,16 +525,12 @@ void tud_midi_rx_cb(uint8_t itf) {
                 if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                     uint8_t c = midiChannels[channel][packet.param1];
                     channels[c].amplitude = packet.param2 / 127.5;
-                    command_queue[c][2][0] = volume(packet.param2);
-                    command_updates[2] = true;
-                    changed = true;
+                    if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) writeVolume(c, packet.param2);
                 }
             } else {
                 // just change whole channel volume
                 channels[channel].amplitude = packet.param2 / 127.5;
-                command_queue[channel][2][0] = volume(packet.param2);
-                command_updates[2] = true;
-                changed = true;
+                writeVolume(channel, packet.param2);
             }
             break;
         } case 0xB0: { // control change
@@ -428,26 +538,18 @@ void tud_midi_rx_cb(uint8_t itf) {
             case 1: { // square duty
                 if (midiMode) {
                     midiDuty[channel] = packet.param2 * 2;
-                    if (midiPrograms[channel] == WaveType::Square) {
+                    if ((WaveType)patches[midiPrograms[channel]].waveTypes[0] == WaveType::Square) {
                         for (int i = 0; i < 128; i++) {
                             if (midiChannels[channel][i] < NUM_CHANNELS) {
                                 uint16_t c = midiChannels[channel][i];
                                 channels[c].duty = packet.param2 / 127.5;
-                                command_queue[c][0][0] = COMMAND_WAVE_TYPE | 1;
-                                command_queue[c][0][1] = midiDuty[channel];
-                                command_updates[0] = true;
-                                changed = true;
+                                if (channels[c].inst == NULL || channels[c].inst->duty.npoints == 0) writeWaveType(c, WaveType::Square, midiDuty[channel]);
                             }
                         }
                     }
                 } else {
                     channels[channel].duty = packet.param2 / 127.5;
-                    if (channels[channel].wavetype == WaveType::Square) {
-                        command_queue[channel][0][0] = COMMAND_WAVE_TYPE | 1;
-                        command_queue[channel][0][1] = packet.param2 * 2;
-                        command_updates[0] = true;
-                        changed = true;
-                    }
+                    if (channels[channel].wavetype == WaveType::Square) writeWaveType(channel, WaveType::Square, packet.param2 * 2);
                 }
                 break;
             } case 7: { // volume
@@ -457,55 +559,50 @@ void tud_midi_rx_cb(uint8_t itf) {
                             uint16_t c = midiChannels[channel][i];
                             channels[c].amplitude = packet.param2 / 127.5;
                             channels[c].fadeStart = 0;
-                            command_queue[c][2][0] = volume(packet.param2);
-                            command_updates[2] = true;
-                            changed = true;
+                            if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) {
+                                writeVolume(c, packet.param2);
+                            }
                         }
                     }
                 } else {
                     channels[channel].amplitude = packet.param2 / 127.5;
                     channels[channel].fadeStart = 0;
-                    command_queue[channel][2][0] = volume(packet.param2);
-                    command_updates[2] = true;
-                    changed = true;
+                    writeVolume(channel, packet.param2);
                 }
                 break;
-            } case 16: { // clock frequency adjustment
+            } case 10: { // pan
                 if (midiMode) {
                     for (int i = 0; i < 128; i++) {
                         if (midiChannels[channel][i] < NUM_CHANNELS) {
                             uint16_t c = midiChannels[channel][i];
-                            channels[c].isLowFreq = packet.param2 & 0x40;
-                            command_queue[c][3][0] = COMMAND_CLOCK | (packet.param2 >> 4);
-                            command_updates[3] = true;
-                            changed = true;
+                            channels[c].pan = (packet.param2 - 64.0) / (packet.param2 > 64 ? 63.0 : 64.0);
+                            if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) {
+                                writeVolume(c, channels[c].amplitude * 127.5);
+                            }
                         }
                     }
                 } else {
-                    channels[channel].isLowFreq = packet.param2 & 0x40;
-                    command_queue[channel][3][0] = COMMAND_CLOCK | (packet.param2 >> 4);
-                    command_updates[3] = true;
-                    changed = true;
+                    channels[channel].pan = (packet.param2 - 64.0) / (packet.param2 > 64 ? 63.0 : 64.0);
+                    writeVolume(channel, channels[channel].amplitude * 127.5);
                 }
                 break;
             } case 24: { // frequency (MSB)
                 uint16_t freq = freq_lsb[channel] | ((uint16_t)packet.param2 << 7);
                 channels[channel].frequency = freq;
-                freq = (uint16_t)floor(freq * freqMultiplier + 0.5);
-                command_queue[channel][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
-                command_queue[channel][1][1] = freq & 0xFF;
-                command_updates[1] = true;
-                changed = true;
+                channels[channel].inst = NULL;
+                writeFrequency(channel, freq);
                 break;
             } case 56: { // frequency (LSB)
                 freq_lsb[channel] = packet.param2;
                 uint16_t freq = freq_lsb[channel] | (channels[channel].frequency & 0xFF00);
                 channels[channel].frequency = freq;
-                freq = (uint16_t)floor(freq * freqMultiplier + 0.5);
-                command_queue[channel][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
-                command_queue[channel][1][1] = freq & 0xFF;
-                command_updates[1] = true;
-                changed = true;
+                channels[channel].inst = NULL;
+                writeFrequency(channel, freq);
+                break;
+            } case 86: { // stereo mode
+                stereo = packet.param2 & 0x40;
+                dualChannel = packet.param2 & 0x20;
+                if (version_minor >= 1) gpio_put(18, stereo);
                 break;
             } case 123: { // all notes off
                 //if (!(packet.param2 & 0x40)) break;
@@ -514,9 +611,8 @@ void tud_midi_rx_cb(uint8_t itf) {
                         if (midiChannels[channel][i] < NUM_CHANNELS) {
                             uint8_t c = midiChannels[channel][i];
                             channels[c].amplitude = 0;
-                            command_queue[c][2][0] = COMMAND_VOLUME | 0;
-                            command_updates[2] = true;
-                            changed = true;
+                            channels[c].inst = NULL;
+                            writeVolume(c, 0);
                             midiUsedChannels[c] = 0xFF;
                         }
                         midiChannels[channel][i] = 0xFF;
@@ -524,9 +620,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                     for (int i = 0; i < 16; i++) midiUsedChannels[i] = 0xFF;
                 } else {
                     channels[channel].amplitude = 0;
-                    command_queue[channel][2][0] = COMMAND_VOLUME | 0;
-                    command_updates[2] = true;
-                    changed = true;
+                    writeVolume(channel, 0);
                 }
                 break;
             } case 126: { // mono mode
@@ -540,37 +634,29 @@ void tud_midi_rx_cb(uint8_t itf) {
             break;
         } case 0xC0: { // program (wave type) change
             if (midiMode) {
-                midiPrograms[channel] = (WaveType)((packet.param1 - 1) & 7);
-                if (midiPrograms[channel] == WaveType::None) {
-                    midiPrograms[channel] = WaveType::Square;
-                    midiDuty[channel] = 128;
-                }
+                midiPrograms[channel] = packet.param1;
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
-                        channels[c].wavetype = midiPrograms[channel];
+                        channels[c].wavetype = (WaveType)patches[midiPrograms[channel]].waveTypes[0];
                         channels[c].fadeStart = 0;
-                        command_queue[c][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)midiPrograms[channel]];
-                        if (midiPrograms[channel] == WaveType::Square) {
-                            channels[c].duty = midiDuty[channel] / 255.0;
-                            command_queue[c][0][1] = midiDuty[channel];
-                        }
-                        command_updates[0] = true;
-                        changed = true;
+                        channels[c].inst = &patches[midiPrograms[channel]];
+                        channels[c].points[0] = channels[c].points[1] = channels[c].points[2] = channels[c].points[3] = 0;
+                        channels[c].ticks[0] = channels[c].ticks[1] = channels[c].ticks[2] = channels[c].ticks[3] = 0;
+                        channels[c].release = false;
+                        if (channels[c].wavetype == WaveType::Square) channels[c].duty = midiDuty[channel] / 255.0;
+                        writeWaveType(c, channels[c].wavetype, midiDuty[channel]);
                     }
                 }
             } else {
                 WaveType type = (WaveType)((packet.param1) & 7);
                 if (type == WaveType::None) {
                     type = WaveType::Square;
-                    channels[channel].duty = 128;
+                    channels[channel].duty = 0.5;
                 }
                 channels[channel].wavetype = type;
                 channels[channel].fadeStart = 0;
-                command_queue[channel][0][0] = COMMAND_WAVE_TYPE | typeconv[(int)type];
-                if (type == WaveType::Square) command_queue[channel][0][1] = channels[channel].duty * 255;
-                command_updates[0] = true;
-                changed = true;
+                writeWaveType(channel, type, channels[channel].duty * 255);
             }
             break;
         } case 0xD0: { // aftertouch (volume change per channel)
@@ -579,16 +665,12 @@ void tud_midi_rx_cb(uint8_t itf) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
                         channels[c].amplitude = packet.param1 / 127.5;
-                        command_queue[c][2][0] = volume(packet.param1);
-                        command_updates[2] = true;
-                        changed = true;
+                        if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) writeVolume(c, packet.param1);
                     }
                 }
             } else {
                 channels[channel].amplitude = packet.param1 / 127.5;
-                command_queue[channel][2][0] = volume(packet.param1);
-                command_updates[2] = true;
-                changed = true;
+                writeVolume(channel, packet.param1);
             }
             break;
         } case 0xE0: { // pitch bend
@@ -597,19 +679,11 @@ void tud_midi_rx_cb(uint8_t itf) {
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
-                        uint16_t freq = floor(channels[c].frequency * pow(2.0, offset / 12.0) * freqMultiplier + 0.5);
-                        command_queue[c][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
-                        command_queue[c][1][1] = freq & 0xFF;
-                        command_updates[1] = true;
-                        changed = true;
+                        writeFrequency(c, channels[c].frequency * pow(2.0, offset / 12.0));
                     }
                 }
             } else {
-                uint16_t freq = floor(channels[channel].frequency * pow(2.0, offset / 12.0) * freqMultiplier + 0.5);
-                command_queue[channel][1][0] = COMMAND_FREQUENCY | ((freq >> 8) & 0x3F);
-                command_queue[channel][1][1] = freq & 0xFF;
-                command_updates[1] = true;
-                changed = true;
+                writeFrequency(channel, channels[channel].frequency * pow(2.0, offset / 12.0));
             }
             break;
         } case 0xF0: { // system commands
@@ -623,7 +697,7 @@ void tud_midi_rx_cb(uint8_t itf) {
                 sleep_us(1);
                 gpio_put(PIN_DATA, false);
                 sleep_us(1);
-                for (int i = 0; i < NUM_CHANNELS; i++) {
+                for (int i = 0; i < MAX_CHANNELS; i++) {
                     gpio_put(PIN_STROBE, true);
                     sleep_us(1);
                     gpio_put(PIN_STROBE, false);
@@ -646,12 +720,26 @@ void tud_midi_rx_cb(uint8_t itf) {
             break;
         }
         }
-        tud_midi_packet_write((const uint8_t*)&packet);
+        //tud_midi_packet_write((const uint8_t*)&packet);
     }
     mutex_exit(&command_queue_lock);
 }
 
 #define TIMER_PERIOD 10000
+
+float processEnvelope(ChannelInfo * info, const Envelope * env, uint16_t * tick, uint8_t * point, bool release) {
+    if ((*point == env->sustain && !release) || *point + 1 >= env->npoints) return env->points[*point].y;
+    else if (++(*tick) >= env->points[*point+1].x) {
+        if (++(*point) == env->loopEnd && env->loopStart < 12 && !release) {
+            *point = env->loopStart;
+            *tick = env->points[*point].x;
+        }
+        return env->points[*point].y;
+    } else {
+        const Point a = env->points[*point], b = env->points[*point+1];
+        return a.y + (b.y - a.y) * ((float)(*tick - a.x) / (float)(b.x - a.x));
+    }
+}
 
 void core2() {
     while (true) {
@@ -659,7 +747,31 @@ void core2() {
         mutex_enter_blocking(&command_queue_lock);
         for (int i = 0; i < NUM_CHANNELS; i++) {
             ChannelInfo * info = &channels[i];
-            if (info->fadeStart > 0) {
+            if (info->inst != NULL) {
+                if (info->inst->pan.npoints > 0 && stereo && dualChannel) {
+                    int8_t val = (int8_t)processEnvelope(info, &info->inst->pan, &info->ticks[1], &info->points[1], info->release);
+                    info->pan = (val - 64.0) / (val > 64 and 63.0 or 64.0);
+                }
+                if (info->inst->volume.npoints > 0) {
+                    writeVolume(i, info->amplitude * processEnvelope(info, &info->inst->volume, &info->ticks[0], &info->points[0], info->release));
+                } else if (info->ticks[0] == 0) {
+                    writeVolume(i, info->amplitude * 127);
+                    info->ticks[0]++;
+                }
+                if (info->inst->frequency.npoints > 0) {
+                    writeFrequency(i, info->frequency * pow(2.0, (processEnvelope(info, &info->inst->frequency, &info->ticks[2], &info->points[2], info->release) - 0x8000) / 192.0));
+                } else if (info->ticks[2] == 0) {
+                    writeFrequency(i, info->frequency);
+                    info->ticks[2]++;
+                }
+                if (info->inst->duty.npoints > 0 && info->wavetype == WaveType::Square) {
+                    writeWaveType(i, WaveType::Square, (uint8_t)processEnvelope(info, &info->inst->duty, &info->ticks[3], &info->points[3], info->release) * 2);
+                }
+                if ((info->inst->volume.npoints > 0 && info->points[0] + 1 >= info->inst->volume.npoints && info->points[1] + 1 >= info->inst->pan.npoints && info->points[2] + 1 >= info->inst->frequency.npoints && (info->wavetype != WaveType::Square || info->points[3] + 1 >= info->inst->duty.npoints)) || (info->inst->volume.npoints == 0 && info->release)) {
+                    info->inst = NULL;
+                    writeWaveType(i, WaveType::None);
+                }
+            } else if (info->fadeStart > 0) {
                 info->amplitude = info->fadeInit + (double)(time - info->fadeStart) / info->fadeLength * info->fadeDirection;
                 if (time - info->fadeStart >= info->fadeLength) {
                     info->fadeInit = 0.0f;
@@ -670,9 +782,7 @@ void core2() {
                         midiUsedChannels[i] = 0xFF;
                     }
                 }
-                command_queue[i][2][0] = volume(info->amplitude * 127);
-                command_updates[2] = true;
-                changed = true;
+                writeVolume(i, info->amplitude * 127);
             }
         }
         if (changed) {
@@ -689,7 +799,7 @@ void core2() {
                     sleep_us_sr(1);
                     gpio_put(PIN_DATA, false);
                     sleep_us_sr(1);
-                    for (int i = 0; i < NUM_CHANNELS; i++) {
+                    for (int i = 0; i < MAX_CHANNELS; i++) {
                         if (command_queue[i][n][0] != 0xFF) {
                             gpio_put(PIN_STROBE, true);
                             sleep_us_sr(1);
@@ -767,14 +877,35 @@ int main() {
     gpio_put(PIN_STROBE, false);
     sleep_us(1);
     mutex_init(&command_queue_lock);
-    for (int i = 0; i < NUM_CHANNELS; i++) {
+    for (int i = 0; i < MAX_CHANNELS; i++) {
         command_queue[i][0][0] = 0xFF;
         command_queue[i][1][0] = 0xFF;
         command_queue[i][2][0] = 0xFF;
         command_queue[i][3][0] = 0xFF;
     }
     memset(midiChannels, 0xFF, 2048);
-    memset(midiUsedChannels, 0xFF, NUM_CHANNELS);
+    memset(midiUsedChannels, 0xFF, MAX_CHANNELS);
+    for (uint8_t i = 0; i < 128; i++) {
+        patches[i] = {
+            { // volume
+                {{0, 127}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+                0, 0xFF, 0xFF, 0xFF
+            },
+            { // pan
+                {{0, 64}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+                0, 0xFF, 0xFF, 0xFF
+            },
+            { // frequency
+                {{0, 0x8000}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+                0, 0xFF, 0xFF, 0xFF
+            },
+            { // duty
+                {{0, i == 0 ? (uint16_t)64 : (uint16_t)i}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+                (i == 0 || i % 8 == 5) ? (uint8_t)0 : (uint8_t)1, 0, 0xFF, 0xFF
+            },
+            {i % 8 == 0 ? (uint8_t)5 : (uint8_t)(i % 8), 0, 0, 0} // waveTypes
+        };
+    }
     tusb_init();
     multicore_launch_core1(core2);
     gpio_put(PICO_DEFAULT_LED_PIN, true);

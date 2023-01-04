@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf8">
+        <title>PSG Instrument Designer</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-GLhlTQ8iRABdZLl6O3oVMWSktQOp6b7In1Zl3/Jr59b6EGGoI1aFkw7cmDA6j6gD" crossorigin="anonymous">
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js" integrity="sha384-w76AqPfDkMBDXo30jS1Sgez6pr3x5MlQ1ZAGC+nuZB+EYdgRZgiwxhTBTkF7CXvN" crossorigin="anonymous"></script>
+        <style>
+            .container {
+                width: 1000px;
+            }
+
+            .box {
+                padding: 2px;
+                border: 1px #000 solid;
+            }
+
+            .canvas-scroll {
+                height: 420px;
+                overflow-x: scroll;
+                overflow-y: hidden;
+                margin-top: 2px;
+                scrollbar-gutter: stable;
+                padding: 2px;
+                padding-bottom: 20px;
+                background: #000;
+            }
+
+            #output {
+                width: 100%;
+                height: 8em;
+            }
+
+            #patch {
+                width: 4em;
+            }
+        </style>
+        <script>
+            /** @type {HTMLCanvasElement} */
+            var canvas = null;
+            /** @type {CanvasRenderingContext2D} */
+            var ctx = null;
+            var envelopes = [
+                {
+                    points: [{x: 0, y: 127}, {x: 50, y: 0}],
+                    sustain: 0,
+                    loopStart: null,
+                    loopEnd: null,
+                    max: 128,
+                    min: 0
+                },
+                {
+                    points: [],
+                    sustain: null,
+                    loopStart: null,
+                    loopEnd: null,
+                    max: 128,
+                    min: 0,
+                },
+                {
+                    points: [],
+                    sustain: null,
+                    loopStart: null,
+                    loopEnd: null,
+                    max: 0x8080,
+                    min: 0x7F80
+                },
+                {
+                    points: [],
+                    sustain: null,
+                    loopStart: null,
+                    loopEnd: null,
+                    max: 128,
+                    min: 0
+                }
+            ];
+            var selected = 0;
+            var object = null;
+
+            function redraw() {
+                ctx.clearRect(0, 0, 6000, 400);
+                ctx.beginPath();
+                ctx.strokeStyle = "#556";
+                ctx.moveTo(0, 200);
+                ctx.lineTo(5999, 200);
+                ctx.stroke();
+                for (let i = 0; i < 200; i++) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = i % 10 == 0 ? "#88a" : "#556";
+                    ctx.moveTo(i * 30, 0);
+                    ctx.lineTo(i * 30, 399);
+                    ctx.stroke();
+                }
+                ctx.beginPath();
+                ctx.strokeStyle = "#ccc";
+                for (let p in envelopes[selected].points) {
+                    let point = envelopes[selected].points[p];
+                    if (p == 0) ctx.moveTo(point.x * 3, 399 - ((point.y - envelopes[selected].min) / (envelopes[selected].max - envelopes[selected].min) * 400));
+                    else ctx.lineTo(point.x * 3, 399 - ((point.y - envelopes[selected].min) / (envelopes[selected].max - envelopes[selected].min) * 400));
+                    ctx.stroke();
+                    ctx.fillRect(point.x * 3 - 2, (399 - ((point.y - envelopes[selected].min) / (envelopes[selected].max - envelopes[selected].min) * 400)) - 2, 5, 5);
+                }
+                if (envelopes[selected].sustain !== null) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = "#fff";
+                    ctx.moveTo(envelopes[selected].points[envelopes[selected].sustain].x * 3, 0);
+                    ctx.lineTo(envelopes[selected].points[envelopes[selected].sustain].x * 3, 399);
+                    ctx.stroke();
+                } else if (envelopes[selected].loopStart !== null) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = "#fff";
+                    ctx.moveTo(envelopes[selected].points[envelopes[selected].loopStart].x * 3, 0);
+                    ctx.lineTo(envelopes[selected].points[envelopes[selected].loopStart].x * 3, 399);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(envelopes[selected].points[envelopes[selected].loopEnd].x * 3, 0);
+                    ctx.lineTo(envelopes[selected].points[envelopes[selected].loopEnd].x * 3, 399);
+                    ctx.stroke();
+                }
+                encode();
+            }
+
+            function init() {
+                canvas = document.getElementById("canvas");
+                ctx = canvas.getContext("2d", {alpha: false});
+                ctx.lineCap = "square";
+                ctx.lineWidth = 2;
+                ctx.fillStyle = "#fff";
+                redraw();
+            }
+
+            function encode() {
+                let str = "";
+                for (let env of envelopes) {
+                    for (let i = 0; i < 12; i++) {
+                        if (i < env.points.length) str += String.fromCharCode(env.points[i].x & 0xFF, env.points[i].x >> 8, env.points[i].y & 0xFF, env.points[i].y >> 8);
+                        else str += "\0\0\0\0";
+                    }
+                    str += String.fromCharCode(env.points.length, env.sustain === null ? 0xFF : env.sustain, env.loopStart === null ? 0xFF : env.loopStart, env.loopEnd === null ? 0xFF : env.loopEnd);
+                }
+                str += String.fromCharCode(parseInt(document.getElementById("waveType").value), 0, 0, 0);
+                document.getElementById("output").value = btoa(str);
+                return btoa(str);
+            }
+
+            function changedType() {
+                document.getElementById("button-duty").disabled = document.getElementById("waveType").value !== "5";
+                encode();
+            }
+
+            var groupButtonNames = ["button-volume", "button-pan", "button-frequency", "button-duty"];
+            var modeButtonNames = ["button-oneshot", "button-sustain", "button-loop"];
+            function switchGroup(id) {
+                for (let i = 0; i < 4; i++) document.getElementById(groupButtonNames[i]).className = id === i ? "btn btn-primary active" : "btn btn-primary";
+                for (let i = 0; i < 3; i++) document.getElementById(modeButtonNames[i]).className = "btn btn-primary";
+                if (envelopes[id].loopStart !== null) document.getElementById("button-loop").className = "btn btn-primary active";
+                else if (envelopes[id].sustain !== null) document.getElementById("button-sustain").className = "btn btn-primary active";
+                else document.getElementById("button-oneshot").className = "btn btn-primary active";
+                selected = id;
+                redraw();
+            }
+
+            function switchMode(id) {
+                for (let i = 0; i < 3; i++) document.getElementById(modeButtonNames[i]).className = id === i ? "btn btn-primary active" : "btn btn-primary";
+                if (id === 0) {
+                    envelopes[selected].sustain = null;
+                    envelopes[selected].loopStart = null;
+                    envelopes[selected].loopEnd = null;
+                } else if (id === 1) {
+                    envelopes[selected].sustain = envelopes[selected].points.length - 1;
+                    envelopes[selected].loopStart = null;
+                    envelopes[selected].loopEnd = null;
+                } else {
+                    envelopes[selected].sustain = null;
+                    envelopes[selected].loopStart = Math.max(envelopes[selected].points.length - 2, 0);
+                    envelopes[selected].loopEnd = envelopes[selected].points.length - 1;
+                }
+                redraw();
+            }
+
+            function getX(x) {
+                return Math.floor((x - canvas.offsetLeft + canvas.parentElement.scrollLeft) / 3);
+            }
+
+            function getY(y, env) {
+                return Math.floor((398 - (y - canvas.offsetTop - 4)) / 400 * (env.max - env.min) + env.min);
+            }
+
+            function mouseDown(event) {
+                event.stopPropagation();
+                for (let p in envelopes[selected].points) {
+                    let point = envelopes[selected].points[p];
+                    if (getX(event.x) === point.x && getY(event.y, envelopes[selected]) >= point.y - 2 && getY(event.y, envelopes[selected]) <= point.y + 2) {
+                        object = parseInt(p);
+                        return;
+                    }
+                }
+                if (envelopes[selected].sustain !== null && getX(event.x) === envelopes[selected].points[envelopes[selected].sustain].x) {
+                    object = "sus"; // amogus
+                    return;
+                }
+                if (envelopes[selected].loopStart !== null && getX(event.x) === envelopes[selected].points[envelopes[selected].loopStart].x) {
+                    object = "start";
+                    return;
+                }
+                if (envelopes[selected].loopEnd !== null && getX(event.x) === envelopes[selected].points[envelopes[selected].loopEnd].x) {
+                    object = "end";
+                    return;
+                }
+            }
+
+            function mouseUp(event) {
+                event.stopPropagation();
+                object = null;
+            }
+
+            /** @param {MouseEvent} event */
+            function mouseDrag(event) {
+                event.stopPropagation();
+                if (!(event.buttons & 1) || object === null) return;
+                if (object === "sus") {
+                    let min = 0xFFFF;
+                    let minp = envelopes[selected].sustain;
+                    for (let p in envelopes[selected].points) {
+                        if (Math.abs(getX(event.x) - envelopes[selected].points[p].x) < min) {
+                            min = Math.abs(getX(event.x) - envelopes[selected].points[p].x);
+                            minp = parseInt(p);
+                        }
+                    }
+                    if (minp !== envelopes[selected].sustain) {
+                        envelopes[selected].sustain = minp;
+                        redraw();
+                    }
+                } else if (object === "start") {
+                    let min = 0xFFFF;
+                    let minp = envelopes[selected].loopStart;
+                    for (let p in envelopes[selected].points) {
+                        if (Math.abs(getX(event.x) - envelopes[selected].points[p].x) < min) {
+                            min = Math.abs(getX(event.x) - envelopes[selected].points[p].x);
+                            minp = parseInt(p);
+                        }
+                    }
+                    if (minp !== envelopes[selected].loopStart) {
+                        envelopes[selected].loopStart = minp;
+                        redraw();
+                    }
+                } else if (object === "end") {
+                    let min = 0xFFFF;
+                    let minp = envelopes[selected].loopEnd;
+                    for (let p in envelopes[selected].points) {
+                        if (Math.abs(getX(event.x) - envelopes[selected].points[p].x) < min) {
+                            min = Math.abs(getX(event.x) - envelopes[selected].points[p].x);
+                            minp = parseInt(p);
+                        }
+                    }
+                    if (minp !== envelopes[selected].loopEnd) {
+                        envelopes[selected].loopEnd = minp;
+                        redraw();
+                    }
+                } else {
+                    if (getY(event.y, envelopes[selected]) < envelopes[selected].min || getY(event.y, envelopes[selected]) >= envelopes[selected].max) return;
+                    for (let p in envelopes[selected].points) if (parseInt(p) !== object && envelopes[selected].points[p].x === getX(event.x)) return;
+                    envelopes[selected].points[object] = {x: object === 0 ? 0 : getX(event.x), y: getY(event.y, envelopes[selected])};
+                    envelopes[selected].points.sort((a, b) => a.x - b.x);
+                    if (object !== 0) for (let p in envelopes[selected].points) if (envelopes[selected].points[p].x === getX(event.x)) object = parseInt(p);
+                    redraw();
+                }
+            }
+
+            function doubleClick(event) {
+                event.stopPropagation();
+                for (let p in envelopes[selected].points) {
+                    let point = envelopes[selected].points[p];
+                    if (point.x === getX(event.x)) {
+                        if (getY(event.y, envelopes[selected]) >= point.y - 2 && getY(event.y, envelopes[selected]) <= point.y + 2) {
+                            envelopes[selected].points.splice(p, 1);
+                            redraw();
+                        }
+                        return;
+                    }
+                }
+                if (envelopes[selected].points.length >= 12) return;
+                envelopes[selected].points.push({x: getX(event.x), y: getY(event.y, envelopes[selected])});
+                envelopes[selected].points.sort((a, b) => a.x - b.x);
+                redraw();
+            }
+
+            function writeMIDI() {
+                if (typeof navigator.requestMIDIAccess !== "function") {
+                    alert("MIDI isn't available on this browser.");
+                    document.getElementById("button-midi").disabled = true;
+                    return;
+                }
+                navigator.requestMIDIAccess({sysex: true}).then(access => {
+                    if (!access.sysexEnabled) {
+                        alert("Cannot send instrument because SysEx messages aren't enabled.");
+                        return;
+                    }
+                    for (let output of access.outputs.values()) {
+                        if (output.manufacturer === "JackMacWindows" && output.name === "PSG MIDI Device") {
+                            output.open().then(() => {
+                                let data = encode().split("").map(c => c.charCodeAt(0));
+                                data.splice(0, 0, 0xF0, 0x00, 0x46, 0x71, 0x02, 0x00, parseInt(document.getElementById("patch").value));
+                                data.push(0xF7);
+                                output.send(data);
+                                setTimeout(() => output.close(), 100);
+                                console.log("MIDI write success");
+                            });
+                            return;
+                        }
+                    }
+                    alert("No PSG MIDI device found.");
+                }).catch(alert);
+            }
+
+            function loadData() {
+                const data = atob(document.getElementById("output").value).split("").map(c => c.charCodeAt(0));
+                for (let i = 0, p = 0; i < 4; i++) {
+                    for (let j = 0; j < 12; j++) {
+                        envelopes[i].points[j] = {x: data[p] | data[p+1] << 8, y: data[p+2] | data[p+3] << 8};
+                        p += 4;
+                    }
+                    envelopes[i].points.length = data[p++];
+                    envelopes[i].sustain = data[p++];
+                    if (envelopes[i].sustain > 11) envelopes[i].sustain = null;
+                    envelopes[i].loopStart = data[p++];
+                    if (envelopes[i].loopStart > 11) envelopes[i].loopStart = null;
+                    envelopes[i].loopEnd = data[p++];
+                    if (envelopes[i].loopEnd > 11) envelopes[i].loopEnd = null;
+                }
+                document.getElementById("waveType").options[data[208] - 1].selected = true;
+                changedType();
+                redraw();
+            }
+            window.onbeforeunload = () => "";
+        </script>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Instrument Designer</h1>
+            <div class="box">
+                <div class="btn-group" role="group">
+                    <button type="button" class="btn btn-primary active" onclick="switchGroup(0)" id="button-volume">Volume</button>
+                    <button type="button" class="btn btn-primary" onclick="switchGroup(1)" id="button-pan">Pan</button>
+                    <button type="button" class="btn btn-primary" onclick="switchGroup(2)" id="button-frequency">Frequency</button>
+                    <button type="button" class="btn btn-primary" onclick="switchGroup(3)" id="button-duty" disabled>Duty</button>
+                </div>
+                <div class="btn-group" role="group">
+                    <button type="button" class="btn btn-primary active" onclick="switchMode(0)" id="button-oneshot">One-shot</button>
+                    <button type="button" class="btn btn-primary" onclick="switchMode(1)" id="button-sustain">Sustain</button>
+                    <button type="button" class="btn btn-primary" onclick="switchMode(2)" id="button-loop">Loop</button>
+                </div>
+                Wave type: <select id="waveType" onchange="changedType()">
+                    <option value="1">Sine</option>
+                    <option value="2">Triangle</option>
+                    <option value="3">Sawtooth (ascending)</option>
+                    <option value="4">Sawtooth (descending)</option>
+                    <option value="5">Square</option>
+                    <option value="6">Noise</option>
+                </select>
+                <div class="canvas-scroll">
+                    <canvas id="canvas" width=6000 height=400px onmousedown="mouseDown(event)" onmouseup="mouseUp(event)" onmousemove="mouseDrag(event)" ondblclick="doubleClick(event)"></canvas>
+                </div>
+            </div>
+            <p>Output instrument data:<br>
+            <textarea id="output"></textarea></p>
+            <p><button type="button" onclick="loadData()" id="button-load" class="btn btn-primary">Load data</button> <button type="button" onclick="writeMIDI()" id="button-midi" class="btn btn-primary">Write to Device</button> Patch number: <input type="number" min=0 max=127 id="patch" value=0></p>
+        </div>
+        <script>init();</script>
+    </body>
+</html>

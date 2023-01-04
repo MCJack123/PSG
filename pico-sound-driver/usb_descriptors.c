@@ -123,7 +123,7 @@ char const* string_desc_arr [] =
   (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
   "JackMacWindows",              // 1: Manufacturer
   "PSG MIDI Device",             // 2: Product
-  "PSGv1.1.0",                   // 3: Serials, should use chip ID
+  "PSGv1.2.0",                   // 3: Serials, should use chip ID
   // serial number format: <type>v<board major>.<board minor>.<software revision>
   // current types: PSG, Analog, FM
 };
