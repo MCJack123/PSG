@@ -10,7 +10,7 @@ This repo contains the source code for my programmable sound generation board. [
 * `pico-sound-driver` contains a Raspberry Pi Pico project for managing the MCUs with a USB MIDI interface.
 * `sound-midi.cpp` is a CraftOS-PC plugin for connecting to the board using the `sound` plugin interface.
 * `programmer.cpp` is a program to quickly flash UF2, HEX, or BIN (concatenated HEX + UF2) firmware files to the PIC chips and the Pico. The current production firmware is available in `firmware.bin`.
-* `instrument-designer.html` is a small HTML+JS app to quickly design and upload instrument patches to the board.
+* [`instrument-designer.html`](https://mcjack123.github.io/PSG/instrument-designer.html) is a small HTML+JS app to quickly design and upload instrument patches to the board.
 
 ## Documentation
 
