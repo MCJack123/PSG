@@ -34,6 +34,14 @@
             #patch {
                 width: 4em;
             }
+
+            #coords {
+                line-height: 1.0;
+                font-size: 10pt;
+                height: 10pt;
+                margin: 0;
+                padding: 0;
+            }
         </style>
         <script>
             /** @type {HTMLCanvasElement} */
@@ -117,6 +125,10 @@
                     ctx.lineTo(envelopes[selected].points[envelopes[selected].loopEnd].x * 3, 399);
                     ctx.stroke();
                 }
+                if (typeof(object) === "number") document.getElementById("coords").innerText = "x=" + envelopes[selected].points[object].x + " y=" + (envelopes[selected].points[object].y - (selected === 2 ? 0x8000 : 0));
+                else if (object === "sus") document.getElementById("coords").innerText = "x=" + envelopes[selected].sustain;
+                else if (object === "start") document.getElementById("coords").innerText = "x=" + envelopes[selected].loopStart;
+                else if (object === "end") document.getElementById("coords").innerText = "x=" + envelopes[selected].loopEnd;
                 encode();
             }
 
@@ -192,19 +204,23 @@
                     let point = envelopes[selected].points[p];
                     if (getX(event.x) === point.x && getY(event.y, envelopes[selected]) >= point.y - 2 && getY(event.y, envelopes[selected]) <= point.y + 2) {
                         object = parseInt(p);
+                        document.getElementById("coords").innerText = "x=" + envelopes[selected].points[object].x + " y=" + (envelopes[selected].points[object].y - (selected === 2 ? 0x8000 : 0));
                         return;
                     }
                 }
                 if (envelopes[selected].sustain !== null && getX(event.x) === envelopes[selected].points[envelopes[selected].sustain].x) {
                     object = "sus"; // amogus
+                    document.getElementById("coords").innerText = "x=" + envelopes[selected].sustain;
                     return;
                 }
                 if (envelopes[selected].loopStart !== null && getX(event.x) === envelopes[selected].points[envelopes[selected].loopStart].x) {
                     object = "start";
+                    document.getElementById("coords").innerText = "x=" + envelopes[selected].loopStart;
                     return;
                 }
                 if (envelopes[selected].loopEnd !== null && getX(event.x) === envelopes[selected].points[envelopes[selected].loopEnd].x) {
                     object = "end";
+                    document.getElementById("coords").innerText = "x=" + envelopes[selected].loopEnd;
                     return;
                 }
             }
@@ -212,6 +228,7 @@
             function mouseUp(event) {
                 event.stopPropagation();
                 object = null;
+                document.getElementById("coords").innerText = "";
             }
 
             /** @param {MouseEvent} event */
@@ -361,6 +378,7 @@
                 <div class="canvas-scroll">
                     <canvas id="canvas" width=6000 height=400px onmousedown="mouseDown(event)" onmouseup="mouseUp(event)" onmousemove="mouseDrag(event)" ondblclick="doubleClick(event)"></canvas>
                 </div>
+                <p id="coords"></p>
             </div>
             <p>Output instrument data:<br>
             <textarea id="output"></textarea></p>
