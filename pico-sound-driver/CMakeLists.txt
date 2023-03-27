@@ -15,7 +15,7 @@ add_executable(sound
 )
 
 # Add pico_stdlib library which aggregates commonly used features
-target_link_libraries(sound pico_stdlib hardware_timer hardware_pwm hardware_gpio pico_sync pico_multicore pico_bootrom tinyusb_device)
+target_link_libraries(sound pico_stdlib hardware_timer hardware_pwm hardware_flash hardware_gpio pico_sync pico_multicore pico_bootrom tinyusb_device)
 
 pico_enable_stdio_usb(sound 0)
 pico_enable_stdio_uart(sound 0)

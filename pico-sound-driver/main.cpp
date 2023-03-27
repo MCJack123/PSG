@@ -10,6 +10,7 @@
  * Copyright (c) 2022-2023 JackMacWindows.
  */
 
+#include <hardware/flash.h>
 #include <hardware/gpio.h>
 #include <hardware/timer.h>
 #include <hardware/watchdog.h>
@@ -118,6 +119,7 @@ struct MidiPacket {
     uint8_t param2;
 };
 
+extern char usb_serial[];
 ChannelInfo channels[MAX_CHANNELS];
 uint8_t typeconv[9] = {0, 5, 4, 2, 3, 1, 6, 0, 6};
 const double freqMultiplier = (65536.0 * CLOCKS_PER_LOOP) / 8000000.0;
@@ -348,7 +350,7 @@ int loadhex(const char *data, size_t size) {
                 for (int i = 0; i < max_extent; i++) {
                     for (uint16_t addr = program_extents[i].start & 0x7F0; addr < program_extents[i].end; addr += 0x10) {
                         uint8_t len = min(program_extents[i].end - addr, 0x10);
-                        if (addr + len >= 0x700) continue; // don't overwrite bootloader
+                        if (addr < 0x200) continue; // don't overwrite bootloader
                         write_data(0, len << 1);
                         write_data(0, addr >> 7);
                         write_data(0, addr << 1);
@@ -906,6 +908,10 @@ int main() {
             {i % 8 == 0 ? (uint8_t)5 : (uint8_t)(i % 8), 0, 0, 0} // waveTypes
         };
     }
+    uint64_t serial = 0;
+    flash_get_unique_id((uint8_t*)&serial);
+    sprintf(usb_serial, "%016lx", serial);
+    usb_serial[16] = ':';
     tusb_init();
     multicore_launch_core1(core2);
     gpio_put(PICO_DEFAULT_LED_PIN, true);
