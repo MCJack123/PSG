@@ -314,7 +314,7 @@
                         return;
                     }
                     for (let output of access.outputs.values()) {
-                        if ((output.manufacturer === "" || output.manufacturer === "JackMacWindows") && output.name === "PSG MIDI Device") {
+                        if ((output.manufacturer === "" || output.manufacturer === "JackMacWindows") && output.name.indexOf("PSG MIDI Device") != -1) {
                             output.open().then(() => {
                                 let data = encode().split("").map(c => c.charCodeAt(0));
                                 data.splice(0, 0, 0xF0, 0x00, 0x46, 0x71, 0x02, 0x00, parseInt(document.getElementById("patch").value));
