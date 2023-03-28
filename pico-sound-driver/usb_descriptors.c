@@ -117,7 +117,7 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
 // String Descriptors
 //--------------------------------------------------------------------+
 
-char usb_serial[] = "0000000000000000:PSGv1.2.0";
+char usb_serial[] = "0000000000000000:Analogv1.2.0";
 // serial number format: <serial>:<type>v<board major>.<board minor>.<software revision>
 // current types: PSG, Analog, FM
 

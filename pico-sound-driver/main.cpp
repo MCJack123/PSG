@@ -35,7 +35,7 @@
 #define COMMAND_WAVE_TYPE 0x00
 #define COMMAND_VOLUME    0x40
 #define COMMAND_FREQUENCY 0x80
-#define COMMAND_CLOCK     0xC0
+#define COMMAND_LPF       0xC0
 
 #define PIN_STROBE 19
 #define PIN_DATA   20
@@ -46,7 +46,7 @@
 
 // !! CLOCK MULTIPLIER CONSTANT !!
 // UPDATE THIS IF MODIFYING THE RUN LENGTH OF THE LOOP CODE
-#define CLOCKS_PER_LOOP 70
+#define CLOCKS_PER_LOOP 128
 
 enum class WaveType {
     None,
@@ -229,6 +229,18 @@ void writeVolume(uint8_t c, uint8_t vol) {
         command_queue[c][2][0] = COMMAND_VOLUME | (uint8_t)floor(13.0 * log(vol + 1) + 0.5);
     }
     command_updates[2] = true;
+    changed = true;
+}
+
+void writeCutoff(uint8_t c, uint8_t cutoff) {
+    if ((cutoff & 0x7E) == 0x7E) cutoff = 0x7C; // don't write 0xFF
+    // command_queue[c][3][0] = COMMAND_LPF | (uint8_t)floor((1 - pow(M_E, -((cutoff * 128.0) / 16384.0)*2*M_PI)) * 63.0);
+    command_queue[c][3][0] = COMMAND_LPF | (cutoff >> 1);
+    if (dualChannel) {
+        // command_queue[c+8][3][0] = COMMAND_LPF | (uint8_t)floor((1 - pow(M_E, -((cutoff * 128.0) / 16384.0)*2*M_PI)) * 63.0);
+        command_queue[c+8][3][0] = COMMAND_LPF | (cutoff >> 1);
+    }
+    command_updates[3] = true;
     changed = true;
 }
 
@@ -600,6 +612,15 @@ void tud_midi_rx_cb(uint8_t itf) {
                 channels[channel].frequency = freq;
                 channels[channel].inst = NULL;
                 writeFrequency(channel, freq);
+                break;
+            } case 74: { // LPF cutoff
+                if (midiMode) {
+                    for (int i = 0; i < NUM_CHANNELS; i++) {
+                        writeCutoff(i, packet.param2);
+                    }
+                } else {
+                    writeCutoff(channel, packet.param2);
+                }
                 break;
             } case 86: { // stereo mode
                 stereo = packet.param2 & 0x40;
