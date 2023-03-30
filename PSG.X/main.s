@@ -2,10 +2,9 @@
 ; PSG.X/main.s
 ; PSG
 ;
-; This file contains the firmware for the PIC channel chips. It generates a
-; waveform of the specified type, volume, and frequency; responds to events from
-; an 8-bit data bus over A5/4 & D5-0; and can receive firmware updates from the
-; 8-bit data bus and write them to flash.
+; This file contains the main firmware for the PIC channel chips. It generates a
+; waveform of the specified type, volume, and frequency, and responds to events
+; from an 8-bit data bus over A5/4 & D5-0.
 ;
 ; This code is licensed under the GPLv2 license.
 ; Copyright (c) 2022-2023 JackMacWindows.
@@ -47,6 +46,9 @@ global _sine_table
 ; - 0x077: low pass alpha
 ; - 0x078: square duty cycle
 ; - 0x079: if set on WDT reset, do full reset
+; - 0x07A: resonator beta (n-1 coeff)
+;          bits 7:2 = fractional part, bit 1 = sign, bit 0 = 1s bit
+; - 0x07B: resonator gamma (n-2 coeff)
 ; general purpose memory:
 ; - 0x120: scale operation result
 ; - 0x121: scale operation input
@@ -54,6 +56,13 @@ global _sine_table
 ; - 0x123-0x124: random buffer
 ; - 0x125: last output value
 ; - 0x126: whether to flip LPF product
+; - 0x128: last resonator output
+; - 0x129: last last resonator output
+; - 0x12A: resonator beta product upper
+; - 0x12B: resonator beta product high
+; - 0x12C: resonator beta product low
+; - 0x12D: resonator gamma product high
+; - 0x12E: resonator gamma product low
     
 ; wave types: none, square, sawtooth up, sawtooth down, triangle, sine, noise, ?
     
@@ -73,7 +82,7 @@ _sysCommand:
 psect init,class=CODE,delta=2 ; PIC10/12/16
 interrupt:
     btfsc 0x0C, 5
-    goto setLPF
+    goto setParam
     btfsc 0x0C, 4
     goto setVolume
 setWaveType:
@@ -113,15 +122,26 @@ setVolume:
     subwf 0x76
     goto done
     
-setLPF:
+setParam:
     btfss 0x0C, 4
     goto setIncrement
-    ; set LPF alpha
+    ; get parameter address
     movf 0x0E, 0
-    addlw 0x01
-    movwf 0x77
-    lslf 0x77
-    lslf 0x77
+    addlw 0x70
+    movwf 0x04
+    clrf 0x05
+    ; wait for next clock
+    btfsc 0x0C, 1 ; loop while bit 1 is set
+    bra -2
+    btfss 0x0C, 1 ; loop while bit 1 is not set
+    bra -2
+    ; set parameter value
+    movf 0x0C, 0
+    andlw 0x30
+    lslf 0x09
+    lslf 0x09
+    iorwf 0x0E, 0
+    movwf 0x00
     goto done
     
 setIncrement:
@@ -178,10 +198,18 @@ init:
     clrf 0x74
     clrf 0x75
     clrf 0x76
-    movlw 0xFC
+    movlw 0xFF
     movwf 0x77
     clrf 0x78
     clrf 0x79
+    clrf 0x7A
+    clrf 0x7B
+    movlb 2
+    movlw 1
+    movwf 0x24
+    clrf 0x25
+    clrf 0x28
+    clrf 0x29
     ; Debugging: pre-set wave
     ;movlw 0x06
     ;movwf 0x70
@@ -215,8 +243,6 @@ init:
     movlb 2
     movlw 0xA0 ; DAC1EN, DAC1OE1, DAC1PSS = Vdd
     movwf 0x18
-    movlw 1
-    movwf 0x24
     ; Enable interrupts
     movlw 0x90 ; GIE, INTE
     movwf 0x0B
@@ -226,8 +252,9 @@ init:
     ; to use the instruction count as a stable clock for sample timings.
     ; Base clock time: 22 clocks
     ; Clock time for each type: 13 clocks
-    ; Clock time for filter + scaling: 93 clocks
-    ; Total clock time required: 128 clocks
+    ; Clock time for resonator: 124 clocks
+    ; Clock time for low pass filter + scaling: 93 clocks
+    ; Total clock time required: 252 clocks
 loop:
     ; Check volume + frequency for all 0s: 11 clocks
     movf 0x71
@@ -399,15 +426,134 @@ skip_noise:
     goto scale_output
     
 scale_output:
-    ; Multiply unscaled output by low pass: 55 clocks
     ; from http://www.piclist.com/techref/microchip/math/mul/8x8.htm
-mult    MACRO
+mult    MACRO	HI, LO
     btfsc   0x03, 0
-    addwf   0x20,F
-    rrf     0x20,F
-    rrf     0x21,F
+    addwf   HI,F
+    rrf     HI,F
+    rrf     LO,F
 ENDM
+    ; 1. Resonator filter
+    ; Multiply beta factor: 40 clocks
+    movf 0x7A, 0
+    movwf 0x2C
+    movlw 0xFC
+    andwf 0x2C
+    movf 0x28, 0
+    
+    clrf    0x2A
+    clrf    0x2B                    ;* 1 cycle
+    rrf     0x2C,F                  ;* 1 cycle
+    
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    mult    0x2B, 0x2C              ;* 4 cycles
+    
+    ; Add the multiplicand (in W) again if the 1s bit is set: 7 clocks
+    btfss 0x7A, 0
+    goto resonator_beta_1_skip
+    addwf 0x2B
+    btfsc 0x03, 0
+    incf 0x2A
+    goto resonator_beta_1_continue
+    
+resonator_beta_1_skip:
+    nop
+    nop
+    nop
+    nop
+resonator_beta_1_continue:
+    ; Two's complement the product if the negative bit is set: 12 clocks
+    btfss 0x7A, 1
+    goto resonator_beta_neg_skip
+    comf 0x12A
+    comf 0x12B
+    comf 0x12C
+    incf 0x12C
+    btfsc 0x03, 2
+    incf 0x12B
+    btfsc 0x03, 2
+    incf 0x12A
+    goto resonator_gamma
+    
+resonator_beta_neg_skip:
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+resonator_gamma:
+    ; Multiply gamma factor: 37 clocks
+    movf 0x7B, 0
+    movwf 0x2E
+    movf 0x29, 0
+    
+    clrf    0x2D                    ;* 1 cycle
+    rrf     0x2E,F                  ;* 1 cycle
+    
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    mult    0x2D, 0x2E              ;* 4 cycles
+    
+    ; Sum products: 24 clocks
+    movf 0x2E, 0
+    subwf 0x2C
+    movf 0x2D, 0
+    subwfb 0x2B
+    btfss 0x03, 0
+    decf 0x2A
+    movf 0x21, 0
+    addwf 0x2B
+    btfsc 0x03, 0
+    incf 0x2A
+    btfsc 0x2C, 7
+    incfsz 0x2B
+    bra 1 ; ------------.
+    incf 0x2A ;         |
+    btfsc 0x2A, 7 ; <---'
+    goto resonance_sum_underflow
+    movf 0x2A, 0
+    xorlw 0x00
+    btfss 0x03, 2
+    goto resonance_sum_overflow
+    movf 0x2B, 0
+    movwf 0x21
+    goto low_pass
 
+resonance_sum_underflow:
+    nop
+    nop
+    nop
+    movlw 0x00
+    movwf 0x21
+    goto low_pass
+    
+resonance_sum_overflow:
+    nop
+    movlw 0xFF
+    movwf 0x21
+low_pass:
+    ; Set last values: 4 clocks
+    movf 0x28, 0
+    movwf 0x29
+    movf 0x21, 0
+    movwf 0x28
+    ; 2. Low-pass filter
+    ; Multiply resonator output by low pass: 55 clocks
     movf 0x25, 0
     subwf 0x21
     btfsc 0x03, 0 ; check borrow
@@ -417,6 +563,7 @@ ENDM
     movlw 0xFF
     movwf 0x26
     goto low_pass_continue
+
 low_pass_skip:
     nop
     nop
@@ -428,14 +575,15 @@ low_pass_continue:
     clrf    0x20                    ;* 1 cycle
     rrf     0x21,F                  ;* 1 cycle
 
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    
     btfsc 0x21, 7
     incf 0x20
     movf 0x20, 0
@@ -443,6 +591,7 @@ low_pass_continue:
     goto low_pass_sub
     addwf 0x25, 0
     goto low_pass_continue2
+
 low_pass_sub:
     nop
     subwf 0x25, 0
@@ -450,19 +599,20 @@ low_pass_continue2:
     movwf 0x25
     movwf 0x21
     
+    ; 3. Amplifier filter
     ; Scale volume + output: 38 clocks
     movf 0x71, 0
     clrf    0x20                    ;* 1 cycle
     rrf     0x21,F                  ;* 1 cycle
 
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
-    mult                            ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
+    mult    0x20, 0x21              ;* 4 cycles
     movf 0x20, 0
     addwf 0x76, 0
     movwf 0x19

@@ -35,7 +35,7 @@
 #define COMMAND_WAVE_TYPE 0x00
 #define COMMAND_VOLUME    0x40
 #define COMMAND_FREQUENCY 0x80
-#define COMMAND_LPF       0xC0
+#define COMMAND_PARAM     0xC0
 
 #define PIN_STROBE 19
 #define PIN_DATA   20
@@ -46,7 +46,7 @@
 
 // !! CLOCK MULTIPLIER CONSTANT !!
 // UPDATE THIS IF MODIFYING THE RUN LENGTH OF THE LOOP CODE
-#define CLOCKS_PER_LOOP 128
+#define CLOCKS_PER_LOOP 252
 
 enum class WaveType {
     None,
@@ -82,7 +82,11 @@ struct Instrument {
     Envelope pan;
     Envelope frequency;
     Envelope duty;
-    uint8_t waveTypes[4] = {0, 0, 0, 0};
+    Envelope cutoff;
+    Envelope resonance;
+    uint8_t waveType;
+    uint8_t linkedInst;
+    int8_t detune;
 };
 
 struct ChannelInfo {
@@ -93,6 +97,8 @@ struct ChannelInfo {
     unsigned int frequency = 0;
     double amplitude = 1.0;
     float pan = 0.0;
+    uint32_t cutoff = 128*62.5;
+    float resonance = 0.0;
     // fade fields
     double fadeInit = 0.0;
     int64_t fadeStart = 0;
@@ -106,10 +112,11 @@ struct ChannelInfo {
     uint8_t note = 0;
     // instrument fields
     Instrument * inst = NULL;
-    uint16_t ticks[4] = {0, 0, 0, 0};
-    uint8_t points[4] = {0, 0, 0, 0};
+    uint16_t ticks[6] = {0, 0, 0, 0, 0, 0};
+    uint8_t points[6] = {0, 0, 0, 0, 0, 0};
     uint8_t typeIndex = 0;
     bool release = false;
+    uint8_t linkedChannel = 0xFF;
 };
 
 struct MidiPacket {
@@ -126,10 +133,12 @@ const double freqMultiplier = (65536.0 * CLOCKS_PER_LOOP) / 8000000.0;
 uint8_t midiChannels[16][128];
 int midiPrograms[16] = {0};
 uint8_t midiDuty[16] = {128};
+uint8_t midiCutoff[16] = {127};
+uint8_t midiResonance[16] = {0};
 uint8_t midiUsedChannels[MAX_CHANNELS] = {0xFF};
 bool midiMode = true;
-uint8_t command_queue[MAX_CHANNELS][4][2];
-bool command_updates[4] = {false};
+uint8_t command_queue[MAX_CHANNELS][6][2];
+bool command_updates[6] = {false};
 mutex_t command_queue_lock;
 bool changed = false;
 uint8_t freq_lsb[MAX_CHANNELS] = {0};
@@ -233,14 +242,43 @@ void writeVolume(uint8_t c, uint8_t vol) {
 }
 
 void writeCutoff(uint8_t c, uint8_t cutoff) {
-    if ((cutoff & 0x7E) == 0x7E) cutoff = 0x7C; // don't write 0xFF
-    // command_queue[c][3][0] = COMMAND_LPF | (uint8_t)floor((1 - pow(M_E, -((cutoff * 128.0) / 16384.0)*2*M_PI)) * 63.0);
-    command_queue[c][3][0] = COMMAND_LPF | (cutoff >> 1);
+    if (cutoff > 127) cutoff = 127;
+    channels[c].cutoff = cutoff * 62.5;
+    uint8_t alpha = cutoff == 127 ? 255 : (uint8_t)floor((1 - pow(M_E, -((cutoff * 62.5) / (32000000.0 / CLOCKS_PER_LOOP))*2*M_PI)) * 255.0);
+    double beta_d = cutoff == 127 ? 0 : (2.0 * channels[c].resonance * cos(2.0 * M_PI * (channels[c].cutoff / (32000000.0 / CLOCKS_PER_LOOP))));
+    uint8_t beta = ((uint8_t)floor(abs(beta_d) * 63.0) & 0x3F) << 2 | (beta_d < 0 ? 2 : 0) | (abs(beta_d) >= 1 ? 1 : 0);
+    command_queue[c][3][0] = COMMAND_PARAM | 7;
+    command_queue[c][3][1] = alpha;
+    command_queue[c][4][0] = COMMAND_PARAM | 10;
+    command_queue[c][4][1] = beta;
     if (dualChannel) {
-        // command_queue[c+8][3][0] = COMMAND_LPF | (uint8_t)floor((1 - pow(M_E, -((cutoff * 128.0) / 16384.0)*2*M_PI)) * 63.0);
-        command_queue[c+8][3][0] = COMMAND_LPF | (cutoff >> 1);
+        command_queue[c+8][3][0] = COMMAND_PARAM | 7;
+        command_queue[c+8][3][1] = alpha;
+        command_queue[c+8][4][0] = COMMAND_PARAM | 10;
+        command_queue[c+8][4][1] = beta;
     }
     command_updates[3] = true;
+    command_updates[4] = true;
+    changed = true;
+}
+
+void writeResonance(uint8_t c, uint8_t res) {
+    channels[c].resonance = res / 128.0;
+    double beta_d = channels[c].cutoff >= (uint32_t)127*62.5 ? 0 : (2.0 * channels[c].resonance * cos(2.0 * M_PI * (channels[c].cutoff / (32000000.0 / CLOCKS_PER_LOOP))));
+    uint8_t beta = ((uint8_t)floor(abs(beta_d) * 63.0) & 0x3F) << 2 | (beta_d < 0 ? 2 : 0) | (abs(beta_d) >= 1 ? 1 : 0);
+    uint8_t gamma = channels[c].cutoff >= (uint32_t)127*62.5 ? 0 : (uint8_t)floor(channels[c].resonance * channels[c].resonance * 255.0);
+    command_queue[c][4][0] = COMMAND_PARAM | 10;
+    command_queue[c][4][1] = beta;
+    command_queue[c][5][0] = COMMAND_PARAM | 11;
+    command_queue[c][5][1] = gamma;
+    if (dualChannel) {
+        command_queue[c+8][4][0] = COMMAND_PARAM | 10;
+        command_queue[c+8][4][1] = beta;
+        command_queue[c+8][5][0] = COMMAND_PARAM | 11;
+        command_queue[c+8][5][1] = gamma;
+    }
+    command_updates[4] = true;
+    command_updates[5] = true;
     changed = true;
 }
 
@@ -466,22 +504,34 @@ void tud_midi_rx_cb(uint8_t itf) {
                         channels[c].amplitude = packet.param2 / 127.5;
                         break;
                     }
+                    int program = midiPrograms[channel];
+                    ChannelInfo * parent = NULL;
+                linkedInst_resume:
                     for (int c = 0; c < NUM_CHANNELS; c++) {
                         if (midiUsedChannels[c] == 0xFF && channels[c].inst == NULL) {
                             midiUsedChannels[c] = channel;
-                            midiChannels[channel][packet.param1] = c;
-                            uint16_t freq = (uint16_t)floor(pow(2.0, ((double)packet.param1 - 69.0) / 12.0) * 440.0 + 0.5);
+                            if (parent) parent->linkedChannel = c;
+                            else midiChannels[channel][packet.param1] = c;
+                            uint16_t freq = (uint16_t)floor(pow(2.0, ((double)packet.param1 - 69.0 + patches[program].detune) / 12.0) * 440.0 + 0.5);
                             channels[c].amplitude = packet.param2 / 127.5;
                             channels[c].frequency = freq;
-                            channels[c].wavetype = (WaveType)patches[midiPrograms[channel]].waveTypes[0];
+                            channels[c].wavetype = (WaveType)patches[program].waveType;
                             channels[c].note = packet.param1;
+                            channels[c].cutoff = midiCutoff[channel];
+                            channels[c].resonance = midiResonance[channel];
                             channels[c].fadeStart = 0;
-                            channels[c].inst = &patches[midiPrograms[channel]];
-                            channels[c].points[0] = channels[c].points[1] = channels[c].points[2] = channels[c].points[3] = 0;
-                            channels[c].ticks[0] = channels[c].ticks[1] = channels[c].ticks[2] = channels[c].ticks[3] = 0;
+                            channels[c].inst = &patches[program];
+                            channels[c].points[0] = channels[c].points[1] = channels[c].points[2] = channels[c].points[3] = channels[c].points[4] = channels[c].points[5] = 0;
+                            channels[c].ticks[0] = channels[c].ticks[1] = channels[c].ticks[2] = channels[c].ticks[3] = channels[c].ticks[4] = channels[c].ticks[5] = 0;
                             channels[c].release = false;
+                            channels[c].linkedChannel = 0xFF;
                             if (channels[c].wavetype == WaveType::Square) channels[c].duty = midiDuty[channel] / 255.0;
                             writeWaveType(c, channels[c].wavetype, midiDuty[channel]);
+                            if (channels[c].inst->linkedInst) {
+                                program = channels[c].inst->linkedInst;
+                                parent = &channels[c];
+                                goto linkedInst_resume;
+                            }
                             break;
                         }
                     }
@@ -500,14 +550,16 @@ void tud_midi_rx_cb(uint8_t itf) {
                 if (midiMode) {
                     if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                         uint8_t c = midiChannels[channel][packet.param1];
-                        if (channels[c].inst == NULL) {
-                            channels[c].amplitude = 0;
-                            channels[c].fadeStart = 0;
-                            writeVolume(c, 0);
-                        } else {
-                            channels[c].release = true;
-                        }
-                        midiUsedChannels[c] = 0xFF;
+                        do {
+                            if (channels[c].inst == NULL) {
+                                channels[c].amplitude = 0;
+                                channels[c].fadeStart = 0;
+                                writeVolume(c, 0);
+                            } else {
+                                channels[c].release = true;
+                            }
+                            midiUsedChannels[c] = 0xFF;
+                        } while ((c = channels[c].linkedChannel) != 0xFF);
                     }
                     midiChannels[channel][packet.param1] = 0xFF;
                 } else {
@@ -519,11 +571,13 @@ void tud_midi_rx_cb(uint8_t itf) {
                 if (midiMode) {
                     if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                         uint8_t c = midiChannels[channel][packet.param1];
-                        channels[c].fadeInit = channels[c].amplitude;
-                        channels[c].fadeStart = time_us_64();
-                        channels[c].fadeDirection = -1;
-                        channels[c].fadeLength = (127 - packet.param2) * (1000000/64);
-                        channels[c].inst = NULL;
+                        do {
+                            channels[c].fadeInit = channels[c].amplitude;
+                            channels[c].fadeStart = time_us_64();
+                            channels[c].fadeDirection = -1;
+                            channels[c].fadeLength = (127 - packet.param2) * (1000000/64);
+                            channels[c].inst = NULL;
+                        } while ((c = channels[c].linkedChannel) != 0xFF);
                     }
                     midiChannels[channel][packet.param1] = 0xFF;
                 } else {
@@ -538,8 +592,10 @@ void tud_midi_rx_cb(uint8_t itf) {
             if (midiMode) {
                 if (midiChannels[channel][packet.param1] < NUM_CHANNELS) {
                     uint8_t c = midiChannels[channel][packet.param1];
-                    channels[c].amplitude = packet.param2 / 127.5;
-                    if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) writeVolume(c, packet.param2);
+                    do {
+                        channels[c].amplitude = packet.param2 / 127.5;
+                        if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) writeVolume(c, packet.param2);
+                    } while ((c = channels[c].linkedChannel) != 0xFF);
                 }
             } else {
                 // just change whole channel volume
@@ -552,12 +608,14 @@ void tud_midi_rx_cb(uint8_t itf) {
             case 1: { // square duty
                 if (midiMode) {
                     midiDuty[channel] = packet.param2 * 2;
-                    if ((WaveType)patches[midiPrograms[channel]].waveTypes[0] == WaveType::Square) {
+                    if ((WaveType)patches[midiPrograms[channel]].waveType == WaveType::Square) {
                         for (int i = 0; i < 128; i++) {
                             if (midiChannels[channel][i] < NUM_CHANNELS) {
                                 uint16_t c = midiChannels[channel][i];
-                                channels[c].duty = packet.param2 / 127.5;
-                                if (channels[c].inst == NULL || channels[c].inst->duty.npoints == 0) writeWaveType(c, WaveType::Square, midiDuty[channel]);
+                                do {
+                                    channels[c].duty = packet.param2 / 127.5;
+                                    if (channels[c].inst == NULL || channels[c].inst->duty.npoints == 0) writeWaveType(c, WaveType::Square, midiDuty[channel]);
+                                } while ((c = channels[c].linkedChannel) != 0xFF);
                             }
                         }
                     }
@@ -571,11 +629,13 @@ void tud_midi_rx_cb(uint8_t itf) {
                     for (int i = 0; i < 128; i++) {
                         if (midiChannels[channel][i] < NUM_CHANNELS) {
                             uint16_t c = midiChannels[channel][i];
-                            channels[c].amplitude = packet.param2 / 127.5;
-                            channels[c].fadeStart = 0;
-                            if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) {
-                                writeVolume(c, packet.param2);
-                            }
+                            do {
+                                channels[c].amplitude = packet.param2 / 127.5;
+                                channels[c].fadeStart = 0;
+                                if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) {
+                                    writeVolume(c, packet.param2);
+                                }
+                            } while ((c = channels[c].linkedChannel) != 0xFF);
                         }
                     }
                 } else {
@@ -589,10 +649,12 @@ void tud_midi_rx_cb(uint8_t itf) {
                     for (int i = 0; i < 128; i++) {
                         if (midiChannels[channel][i] < NUM_CHANNELS) {
                             uint16_t c = midiChannels[channel][i];
-                            channels[c].pan = (packet.param2 - 64.0) / (packet.param2 > 64 ? 63.0 : 64.0);
-                            if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) {
-                                writeVolume(c, channels[c].amplitude * 127.5);
-                            }
+                            do {
+                                channels[c].pan = (packet.param2 - 64.0) / (packet.param2 > 64 ? 63.0 : 64.0);
+                                if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) {
+                                    writeVolume(c, channels[c].amplitude * 127.5);
+                                }
+                            } while ((c = channels[c].linkedChannel) != 0xFF);
                         }
                     }
                 } else {
@@ -613,8 +675,19 @@ void tud_midi_rx_cb(uint8_t itf) {
                 channels[channel].inst = NULL;
                 writeFrequency(channel, freq);
                 break;
+            } case 71: { // resonance
+                if (midiMode) {
+                    midiResonance[channel] = packet.param2;
+                    for (int i = 0; i < NUM_CHANNELS; i++) {
+                        writeResonance(i, packet.param2);
+                    }
+                } else {
+                    writeResonance(channel, packet.param2);
+                }
+                break;
             } case 74: { // LPF cutoff
                 if (midiMode) {
+                    midiCutoff[channel] = packet.param2;
                     for (int i = 0; i < NUM_CHANNELS; i++) {
                         writeCutoff(i, packet.param2);
                     }
@@ -633,10 +706,12 @@ void tud_midi_rx_cb(uint8_t itf) {
                     for (int i = 0; i < 128; i++) {
                         if (midiChannels[channel][i] < NUM_CHANNELS) {
                             uint8_t c = midiChannels[channel][i];
-                            channels[c].amplitude = 0;
-                            channels[c].inst = NULL;
-                            writeVolume(c, 0);
-                            midiUsedChannels[c] = 0xFF;
+                            do {
+                                channels[c].amplitude = 0;
+                                channels[c].inst = NULL;
+                                writeVolume(c, 0);
+                                midiUsedChannels[c] = 0xFF;
+                            } while ((c = channels[c].linkedChannel) != 0xFF);
                         }
                         midiChannels[channel][i] = 0xFF;
                     }
@@ -661,14 +736,18 @@ void tud_midi_rx_cb(uint8_t itf) {
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
-                        channels[c].wavetype = (WaveType)patches[midiPrograms[channel]].waveTypes[0];
-                        channels[c].fadeStart = 0;
-                        channels[c].inst = &patches[midiPrograms[channel]];
-                        channels[c].points[0] = channels[c].points[1] = channels[c].points[2] = channels[c].points[3] = 0;
-                        channels[c].ticks[0] = channels[c].ticks[1] = channels[c].ticks[2] = channels[c].ticks[3] = 0;
-                        channels[c].release = false;
-                        if (channels[c].wavetype == WaveType::Square) channels[c].duty = midiDuty[channel] / 255.0;
-                        writeWaveType(c, channels[c].wavetype, midiDuty[channel]);
+                        uint8_t program = midiPrograms[channel];
+                        do {
+                            channels[c].wavetype = (WaveType)patches[program].waveType;
+                            channels[c].fadeStart = 0;
+                            channels[c].inst = &patches[program];
+                            channels[c].points[0] = channels[c].points[1] = channels[c].points[2] = channels[c].points[3] = 0;
+                            channels[c].ticks[0] = channels[c].ticks[1] = channels[c].ticks[2] = channels[c].ticks[3] = 0;
+                            channels[c].release = false;
+                            if (channels[c].wavetype == WaveType::Square) channels[c].duty = midiDuty[channel] / 255.0;
+                            writeWaveType(c, channels[c].wavetype, midiDuty[channel]);
+                            if (patches[program].linkedInst) program = patches[program].linkedInst;
+                        } while ((c = channels[c].linkedChannel) != 0xFF);
                     }
                 }
             } else {
@@ -687,8 +766,10 @@ void tud_midi_rx_cb(uint8_t itf) {
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
-                        channels[c].amplitude = packet.param1 / 127.5;
-                        if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) writeVolume(c, packet.param1);
+                        do {
+                            channels[c].amplitude = packet.param1 / 127.5;
+                            if (channels[c].inst == NULL || channels[c].inst->volume.npoints == 0) writeVolume(c, packet.param1);
+                        } while ((c = channels[c].linkedChannel) != 0xFF);
                     }
                 }
             } else {
@@ -702,7 +783,9 @@ void tud_midi_rx_cb(uint8_t itf) {
                 for (int i = 0; i < 128; i++) {
                     if (midiChannels[channel][i] < NUM_CHANNELS) {
                         uint16_t c = midiChannels[channel][i];
-                        writeFrequency(c, channels[c].frequency * pow(2.0, offset / 12.0));
+                        do {
+                            writeFrequency(c, channels[c].frequency * pow(2.0, offset / 12.0));
+                        } while ((c = channels[c].linkedChannel) != 0xFF);
                     }
                 }
             } else {
@@ -787,6 +870,18 @@ void core2() {
                     writeFrequency(i, info->frequency);
                     info->ticks[2]++;
                 }
+                if (info->inst->cutoff.npoints > 0) {
+                    writeCutoff(i, processEnvelope(info, &info->inst->cutoff, &info->ticks[4], &info->points[4], info->release));
+                } else if (info->ticks[4] == 0) {
+                    writeCutoff(i, info->cutoff);
+                    info->ticks[4]++;
+                }
+                if (info->inst->resonance.npoints > 0) {
+                    writeResonance(i, processEnvelope(info, &info->inst->resonance, &info->ticks[5], &info->points[5], info->release));
+                } else if (info->ticks[5] == 0) {
+                    writeResonance(i, info->resonance);
+                    info->ticks[5]++;
+                }
                 if (info->inst->duty.npoints > 0 && info->wavetype == WaveType::Square) {
                     writeWaveType(i, WaveType::Square, (uint8_t)processEnvelope(info, &info->inst->duty, &info->ticks[3], &info->points[3], info->release) * 2);
                 }
@@ -811,7 +906,7 @@ void core2() {
         if (changed) {
             changed = false;
             gpio_put(PICO_DEFAULT_LED_PIN, false);
-            for (int n = 0; n < 4; n++) {
+            for (int n = 0; n < 6; n++) {
                 if (command_updates[n]) {
                     command_updates[n] = false;
                     gpio_put(PIN_DATA, true);
@@ -829,7 +924,7 @@ void core2() {
                             gpio_put(PIN_STROBE, false);
                             sleep_us_sr(1);
                             write_data(i, command_queue[i][n][0]);
-                            if (n == 1 || command_queue[i][n][0] == (COMMAND_WAVE_TYPE | 1)) write_data(i, command_queue[i][n][1]);
+                            if (!(n == 0 || n == 2) || command_queue[i][n][0] == (COMMAND_WAVE_TYPE | 1)) write_data(i, command_queue[i][n][1]);
                             command_queue[i][n][0] = 0xFF;
                         }
                         gpio_put(PIN_CLOCK, true);
@@ -905,6 +1000,8 @@ int main() {
         command_queue[i][1][0] = 0xFF;
         command_queue[i][2][0] = 0xFF;
         command_queue[i][3][0] = 0xFF;
+        command_queue[i][4][0] = 0xFF;
+        command_queue[i][5][0] = 0xFF;
     }
     memset(midiChannels, 0xFF, 2048);
     memset(midiUsedChannels, 0xFF, MAX_CHANNELS);
@@ -926,7 +1023,17 @@ int main() {
                 {{0, i == 0 ? (uint16_t)64 : (uint16_t)i}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
                 (i == 0 || i % 8 == 5) ? (uint8_t)0 : (uint8_t)1, 0, 0xFF, 0xFF
             },
-            {i % 8 == 0 ? (uint8_t)5 : (uint8_t)(i % 8), 0, 0, 0} // waveTypes
+            { // cutoff
+                {{0, 0x7F}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+                0, 0xFF, 0xFF, 0xFF
+            },
+            { // resonance
+                {{0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+                0, 0xFF, 0xFF, 0xFF
+            },
+            i % 8 == 0 ? (uint8_t)5 : (uint8_t)(i % 8), // waveType
+            0, // linkedInst
+            0 // detune
         };
     }
     uint64_t serial = 0;
