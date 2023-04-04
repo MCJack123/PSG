@@ -369,10 +369,10 @@
                     envelopes[i].loopEnd = data[p++];
                     if (envelopes[i].loopEnd > 11) envelopes[i].loopEnd = null;
                 }
-                document.getElementById("waveType").options[data[208] - 1].selected = true;
-                document.getElementById("linked-check").checked = data[209] != 0;
-                document.getElementById("linked-number").value = data[209];
-                document.getElementById("detune").value = data[210] & 0x80 ? data[210] - 256 : data[210];
+                document.getElementById("waveType").options[data[312] - 1].selected = true;
+                document.getElementById("linked-check").checked = data[313] != 0;
+                document.getElementById("linked-number").value = data[313];
+                document.getElementById("detune").value = data[314] & 0x80 ? data[314] - 256 : data[314];
                 changedType();
                 redraw();
             }
